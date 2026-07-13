@@ -84,6 +84,16 @@ The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every
 - `train|val|test_predictions.csv`: every prediction, the three probabilities, and ECG/patient/fold identifiers for audit.
 - `best_model.pt` and `metrics.json`: selected model state and epoch history.
 
+The default configuration also uses moderate square-root class-aware
+sampling, softened inverse-frequency loss weights, and a weighted STEMI
+auxiliary loss.  A STEMI decision threshold is calibrated on fold 9 by macro-F1
+and frozen before fold 10 evaluation; the training counts and calibration
+values are recorded in `metrics.json`.
+
+The morphology-fusion model also has a light LBBB auxiliary task.  It predicts
+the morphology extractor's LBBB flag from the raw ECG embedding to strengthen
+conduction-pattern representations; it is not a separate clinical endpoint.
+
 Never report the test result as clinical NSTEMI diagnostic accuracy.
 
 ## Research safeguards

@@ -19,8 +19,29 @@ from sklearn.metrics import (
 from . import CLASS_NAMES
 
 
-def multiclass_metrics(y_true: np.ndarray, probabilities: np.ndarray) -> dict[str, float | list[list[int]]]:
+def predict_labels(probabilities: np.ndarray, stemi_threshold: float | None = None) -> np.ndarray:
+    """Convert probabilities to labels, optionally calibrating STEMI recall.
+
+    The threshold is selected on the validation fold only.  If a record does
+    not meet the STEMI threshold, the decision is made between non-MI and
+    NSTEMI-proxy, preserving a valid three-class prediction.
+    """
+    probabilities = np.asarray(probabilities, dtype=float)
     pred = probabilities.argmax(axis=1)
+    if stemi_threshold is None:
+        return pred
+    non_stemi = np.where(probabilities[:, 0] >= probabilities[:, 2], 0, 2)
+    pred = non_stemi
+    pred[probabilities[:, 1] >= float(stemi_threshold)] = 1
+    return pred
+
+
+def multiclass_metrics(
+    y_true: np.ndarray,
+    probabilities: np.ndarray,
+    stemi_threshold: float | None = None,
+) -> dict[str, float | list[list[int]]]:
+    pred = predict_labels(probabilities, stemi_threshold)
     onehot = np.eye(probabilities.shape[1])[y_true]
     output: dict[str, float | list[list[int]]] = {
         "macro_f1": float(f1_score(y_true, pred, average="macro", zero_division=0)),
@@ -28,6 +49,8 @@ def multiclass_metrics(y_true: np.ndarray, probabilities: np.ndarray) -> dict[st
         "stemi_recall": float(recall_score(y_true, pred, labels=[1], average=None, zero_division=0)[0]),
         "confusion_matrix": confusion_matrix(y_true, pred, labels=[0, 1, 2]).tolist(),
     }
+    if stemi_threshold is not None:
+        output["stemi_threshold"] = float(stemi_threshold)
     try:
         output["macro_auroc"] = float(roc_auc_score(onehot, probabilities, average="macro", multi_class="ovr"))
         output["macro_auprc"] = float(average_precision_score(onehot, probabilities, average="macro"))
@@ -37,11 +60,15 @@ def multiclass_metrics(y_true: np.ndarray, probabilities: np.ndarray) -> dict[st
     return output
 
 
-def classification_tables(y_true: np.ndarray, probabilities: np.ndarray) -> tuple[dict[str, float | list[list[int]]], pd.DataFrame, pd.DataFrame]:
+def classification_tables(
+    y_true: np.ndarray,
+    probabilities: np.ndarray,
+    stemi_threshold: float | None = None,
+) -> tuple[dict[str, float | list[list[int]]], pd.DataFrame, pd.DataFrame]:
     """Return common three-class metrics and labelled confusion/per-class tables."""
     y_true = np.asarray(y_true, dtype=int)
     probabilities = np.asarray(probabilities, dtype=float)
-    y_pred = probabilities.argmax(axis=1)
+    y_pred = predict_labels(probabilities, stemi_threshold)
     matrix = confusion_matrix(y_true, y_pred, labels=[0, 1, 2])
     precision, recall, f1, support = precision_recall_fscore_support(y_true, y_pred, labels=[0, 1, 2], zero_division=0)
     rows = []
@@ -56,7 +83,7 @@ def classification_tables(y_true: np.ndarray, probabilities: np.ndarray) -> tupl
             "specificity": float(tn / max(tn + fp, 1)),
             "support": int(support[index]),
         })
-    overall = multiclass_metrics(y_true, probabilities)
+    overall = multiclass_metrics(y_true, probabilities, stemi_threshold)
     overall["accuracy"] = float(accuracy_score(y_true, y_pred))
     overall["n_records"] = int(len(y_true))
     return overall, pd.DataFrame(rows), pd.DataFrame(matrix, index=CLASS_NAMES, columns=CLASS_NAMES)
@@ -68,19 +95,20 @@ def write_split_artifacts(
     y_true: np.ndarray,
     probabilities: np.ndarray,
     records: pd.DataFrame | None = None,
+    stemi_threshold: float | None = None,
 ) -> dict[str, float | list[list[int]]]:
     """Persist a complete, reviewable result bundle for validation or test data."""
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    overall, per_class, matrix = classification_tables(y_true, probabilities)
+    overall, per_class, matrix = classification_tables(y_true, probabilities, stemi_threshold)
     (out / f"{split}_metrics.json").write_text(json.dumps(overall, indent=2), encoding="utf-8")
     per_class.to_csv(out / f"{split}_classification_report.csv", index=False)
     matrix.to_csv(out / f"{split}_confusion_matrix.csv", index_label="actual\\predicted")
     prediction = pd.DataFrame({
         "actual_id": np.asarray(y_true, dtype=int),
         "actual_label": [CLASS_NAMES[i] for i in y_true],
-        "predicted_id": probabilities.argmax(axis=1),
-        "predicted_label": [CLASS_NAMES[i] for i in probabilities.argmax(axis=1)],
+        "predicted_id": predict_labels(probabilities, stemi_threshold),
+        "predicted_label": [CLASS_NAMES[i] for i in predict_labels(probabilities, stemi_threshold)],
         **{f"prob_{name}": probabilities[:, idx] for idx, name in enumerate(CLASS_NAMES)},
     })
     if records is not None:

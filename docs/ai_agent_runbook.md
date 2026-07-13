@@ -86,6 +86,22 @@ Train the primary model:
 python scripts/train.py --model morphology_fusion --device cuda --out-dir artifacts/morphology_fusion
 ```
 
+The default training configuration includes three first-stage imbalance
+controls: square-root class-aware sampling, square-root inverse-frequency
+cross-entropy weights, and a softened positive weight for the STEMI auxiliary
+binary head.  These are intentionally moderate because combining full
+oversampling with full inverse-frequency loss would over-correct the 744
+STEMI-proxy records.  The validation fold is used to calibrate a STEMI
+probability threshold by macro-F1; that threshold is then frozen for the test
+artifacts.  The selected values and training-fold counts are saved in
+`artifacts/<run>/metrics.json`.
+
+In `morphology_fusion`, the optional LBBB auxiliary head predicts the
+extractor's LBBB flag from the raw ECG embedding.  It is weighted lightly and
+is only active when the `lbbb` morphology feature is present.  This encourages
+the waveform encoder to represent conduction abnormality; it is not a new
+clinical label and must be described as a morphology-derived auxiliary target.
+
 Optional comparison models:
 
 ```powershell
@@ -144,6 +160,10 @@ Every completed training run writes:
 - `best_model.pt`
 - `metrics.json`
 
+`metrics.json` also records the training class counts, class weights,
+sampling strategy, auxiliary STEMI positive weight, and the frozen validation
+STEMI threshold.  Do not tune that threshold on the test fold.
+
 When reporting results, read the test files from the selected artifact directory, usually:
 
 ```text
@@ -172,4 +192,3 @@ If something fails:
 - Missing `label_manifest.csv`: run `scripts/extract_morphology.py`.
 - Morphology extraction interrupted: rerun with `--resume`.
 - Training completes but result files are absent: inspect `scripts/train.py` output directory and rerun the failed command.
-

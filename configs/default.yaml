@@ -22,7 +22,19 @@ training:
   patience: 8
   num_workers: 0
   auxiliary_weight: 0.25
+  lbbb_auxiliary_weight: 0.05
+  # Moderate class-aware oversampling: reduces empty-STEMI batches without
+  # repeatedly copying the 744 STEMI-proxy records into every batch.
+  sampling_strategy: sqrt
+  sampling_power: 0.5
+  # Use softened inverse-frequency weights with the sampler.  Combining full
+  # inverse-frequency sampling and full inverse-frequency loss overcorrects.
+  class_weight_power: 0.5
+  # The auxiliary STEMI head uses a softened positive weight when sampling is
+  # enabled; this keeps it from being dominated by negatives without creating
+  # an excessively high positive gradient.
+  auxiliary_pos_weight_power: 0.5
 metrics:
   selection_metric: val_macro_auprc
+  calibrate_stemi_threshold: true
   report: [macro_auroc, macro_auprc, macro_f1, balanced_accuracy, stemi_recall]
-

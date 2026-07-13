@@ -74,7 +74,12 @@ class InceptionTime(nn.Module):
 
 
 class MorphologyFusion(nn.Module):
-    """Primary model: ECG encoder plus J-point/LBBB evidence and auxiliary heads."""
+    """Primary model with waveform/morphology fusion and auxiliary ECG tasks.
+
+    The LBBB head reads the waveform embedding (before morphology fusion) so
+    its optional auxiliary loss encourages the raw ECG encoder to represent
+    conduction abnormality, instead of merely copying the LBBB input feature.
+    """
     def __init__(self, in_channels: int = 12, feature_dim: int = 0, classes: int = 3):
         super().__init__()
         self.ecg = SEResNet(in_channels, classes=classes)
@@ -83,15 +88,20 @@ class MorphologyFusion(nn.Module):
         total = self.ecg.embedding_dim + (64 if feature_dim else 0)
         self.classifier = nn.Sequential(nn.Linear(total, 256), nn.SiLU(), nn.Dropout(0.25), nn.Linear(256, classes))
         self.stemi_head = nn.Linear(total, 1)
-        self.lbbb_head = nn.Linear(total, 1)
+        self.lbbb_head = nn.Linear(self.ecg.embedding_dim, 1)
 
     def forward(self, x, features=None):
-        z = self.ecg.encode(x)
+        raw_z = self.ecg.encode(x)
+        z = raw_z
         if self.feature_encoder is not None:
             if features is None:
                 features = torch.zeros((x.shape[0], self.feature_dim), device=x.device)
             z = torch.cat([z, self.feature_encoder(features)], dim=1)
-        return {"class_logits": self.classifier(z), "stemi_logits": self.stemi_head(z).squeeze(1), "lbbb_logits": self.lbbb_head(z).squeeze(1)}
+        return {
+            "class_logits": self.classifier(z),
+            "stemi_logits": self.stemi_head(z).squeeze(1),
+            "lbbb_logits": self.lbbb_head(raw_z).squeeze(1),
+        }
 
 
 def make_model(name: str, feature_dim: int = 0, in_channels: int = 12) -> nn.Module:
@@ -99,4 +109,3 @@ def make_model(name: str, feature_dim: int = 0, in_channels: int = 12) -> nn.Mod
     if name == "inceptiontime": return InceptionTime(in_channels)
     if name == "morphology_fusion": return MorphologyFusion(in_channels, feature_dim)
     raise ValueError(f"Unknown model: {name}")
-

@@ -1,0 +1,81 @@
+# Miclass3
+
+`Miclass3` is a reproducible 12-lead ECG research project for three PTB-XL proxy classes, using raw 500 Hz (`records500`) signals:
+
+1. `non_mi` — no diagnostic MI SCP statement.
+2. `stemi_proxy` — MI SCP statement plus contiguous J-point STEMI morphology, or LBBB with positive modified Sgarbossa.
+3. `nstemi_proxy` — MI SCP statement without a STEMI-equivalent pattern.
+
+The third class is deliberately named **NSTEMI-proxy** in code and reporting. PTB-XL does not contain serial troponin, symptoms, coronary angiography, or adjudicated encounter diagnoses, so it cannot establish clinical NSTEMI. See [the full label specification](docs/label_specification.md).
+
+## Architecture
+
+```text
+records500 ECG ──> 12-lead normalization ──> selected neural encoder ──> 3 proxy classes
+                         │
+                         └─> J-point / ST-S / QRS / LBBB evidence ──> fusion model + auxiliary heads
+```
+
+The project intentionally keeps only three strong candidates:
+
+| Model | Use | Why it is included |
+|---|---|---|
+| `morphology_fusion` | Primary | SE-ResNet waveform encoder fused with auditable J-point, ST/S, QRS-duration and LBBB features; auxiliary STEMI head regularizes the noisy proxy target. |
+| `inceptiontime` | Independent high-capacity comparison | Parallel receptive fields capture narrow QRS and slower ST/T morphology without handcrafted fusion. |
+| `seresnet` | Robust waveform baseline | Residual multi-scale representation with squeeze-excitation learns lead importance and is easier to calibrate. |
+
+This is not an architecture sweep. Train `morphology_fusion` first; train the two others only as independent checks that the result is not architecture-specific.
+
+## Install
+
+```bash
+git clone https://github.com/ntu-b12505041/Miclass3.git
+cd Miclass3
+python -m venv .venv
+.venv\\Scripts\\activate
+pip install -r requirements.txt
+pip install -e .
+```
+
+## Build labels
+
+The initial command downloads only PTB-XL metadata. Without morphology input it still produces a valid, conservative first manifest, but no record is promoted to `stemi_proxy` until the J-point/LBBB table is supplied.
+
+```bash
+python scripts/build_labels.py --data-dir data/ptbxl --out data/label_manifest.csv
+python scripts/build_labels.py --data-dir data/ptbxl --morphology-csv data/morphology_features.csv --out data/label_manifest.csv
+```
+
+`morphology_features.csv` needs one row per `ecg_id`; required columns are `standard_stemi`, `lbbb`, and `modified_sgarbossa_positive`. Recommended auxiliary columns are `max_st_j_mv`, `max_st_j60_mv`, `max_st_s_ratio`, and `qrs_duration_ms`.
+
+## Train
+
+PTB-XL waveform files are not redistributed. Download the official `records500` tree under `data/ptbxl/records500/` first, accepting the PhysioNet terms. Then run one model:
+
+```bash
+python scripts/train.py --model morphology_fusion --device cuda
+```
+
+For a CPU pipeline check only:
+
+```bash
+python scripts/train.py --model seresnet --device cpu --max-records 300
+```
+
+The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Report macro-AUROC, macro-AUPRC, macro-F1, balanced accuracy, per-class recall, confusion matrix, calibration, and specifically STEMI-proxy recall. Never report the test result as clinical NSTEMI diagnostic accuracy.
+
+## Research safeguards
+
+- Patient-level official PTB-XL folds are retained.
+- Old infarction stages are excluded rather than silently relabeled as NSTEMI-proxy.
+- LBBB is routed through modified Sgarbossa, not ordinary ST elevation rules.
+- Morphology evidence remains in the label manifest, so every label is auditable.
+- A future hospital cohort with serial hs-cTn and adjudication must be used for clinical validation before any diagnostic claim.
+
+## References
+
+- [PTB-XL dataset](https://physionet.org/content/ptb-xl/1.0.3/)
+- [PTB-XL publication](https://doi.org/10.1038/s41597-020-0495-6)
+- [Fourth Universal Definition of MI](https://doi.org/10.1016/j.jacc.2018.08.1038)
+- [Modified Sgarbossa derivation](https://doi.org/10.1016/j.annemergmed.2012.07.119)
+- [Modified Sgarbossa validation](https://doi.org/10.1016/j.ahj.2015.09.016)

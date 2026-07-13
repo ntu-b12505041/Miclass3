@@ -51,7 +51,13 @@ The repository does not redistribute PTB-XL waveforms. Put the official PhysioNe
 data/ptbxl/records500/
 ```
 
-Build labels:
+Extract morphology and build labels:
+
+```powershell
+python scripts/extract_morphology.py --data-dir data/ptbxl --out data/morphology_features.csv --beats-out data/morphology_beats.csv --label-out data/label_manifest.csv
+```
+
+If you already have a reviewed morphology table, build labels directly:
 
 ```powershell
 python scripts/build_labels.py --data-dir data/ptbxl --morphology-csv data/morphology_features.csv --out data/label_manifest.csv
@@ -99,17 +105,19 @@ Each run writes:
 ```text
 You are working in the Miclass3 repository. Please set up and run GPU training for the PTB-XL three-class MI proxy model.
 
-Follow docs/vscode_gpu_training.md exactly:
+Follow docs/ai_agent_runbook.md first, then docs/vscode_gpu_training.md:
 1. Check the current Python interpreter and create/use .venv if needed.
 2. Check NVIDIA GPU availability with nvidia-smi.
 3. Install the correct CUDA-enabled PyTorch build, then install requirements.txt and the package in editable mode.
 4. Verify torch.cuda.is_available() is True.
-5. Confirm that data/ptbxl/records500 and data/label_manifest.csv exist. If the manifest is missing, build it with scripts/build_labels.py. Use data/morphology_features.csv if present.
-6. Run a smoke test:
+5. Confirm that data/ptbxl/records500 exists.
+6. If data/morphology_features.csv or data/label_manifest.csv is missing, run:
+   python scripts/extract_morphology.py --data-dir data/ptbxl --out data/morphology_features.csv --beats-out data/morphology_beats.csv --label-out data/label_manifest.csv
+7. Run a smoke test:
    python scripts/train.py --model seresnet --device cuda --max-records 300 --out-dir artifacts/smoke_seresnet
-7. If the smoke test succeeds, train the primary model:
+8. If the smoke test succeeds, train the primary model:
    python scripts/train.py --model morphology_fusion --device cuda --out-dir artifacts/morphology_fusion
-8. After training, summarize the test metrics and confusion matrix files generated under artifacts/morphology_fusion.
+9. After training, summarize the test metrics and confusion matrix files generated under artifacts/morphology_fusion.
 
 Do not fabricate results. If data or CUDA is missing, stop and report exactly what is missing.
 ```

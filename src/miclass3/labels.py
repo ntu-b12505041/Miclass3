@@ -61,6 +61,10 @@ def label_record(
     if any(_is_old_stage(stage) for stage in stages) and old_mi_policy == "exclude":
         return LabelDecision("exclude_old_mi", None, "excluded", "old_infarction_stage")
 
+    morphology_quality = str(row.get("morphology_quality", "")).lower()
+    if morphology_quality and morphology_quality not in {"nan", "none", "ok"}:
+        return LabelDecision("exclude_morphology_failed", None, "excluded", f"morphology_{morphology_quality}")
+
     standard_stemi = _truthy(row, "standard_stemi")
     lbbb = _truthy(row, "lbbb")
     modified_sgarbossa = _truthy(row, "modified_sgarbossa_positive")

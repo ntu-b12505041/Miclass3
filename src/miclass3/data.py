@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import requests
-from torch.utils.data import Dataset
 
 PTBXL_URL = "https://physionet.org/files/ptb-xl/1.0.3"
 
@@ -29,7 +28,7 @@ def load_metadata(data_dir: str | Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return meta, pd.read_csv(root / "scp_statements.csv", index_col=0)
 
 
-class PTBXL500Dataset(Dataset):
+class PTBXL500Dataset:
     """Lazy records500 loader.  PTB-XL's default lead order is retained."""
 
     def __init__(self, manifest: pd.DataFrame, data_dir: str | Path, feature_columns: list[str] | None = None):
@@ -50,4 +49,3 @@ class PTBXL500Dataset(Dataset):
         x = (x - x.mean(axis=-1, keepdims=True)) / np.maximum(x.std(axis=-1, keepdims=True), 1e-6)
         features = np.nan_to_num(row.reindex(self.feature_columns).to_numpy(dtype=np.float32))
         return torch.from_numpy(x), torch.tensor(int(row["label_id"])), torch.from_numpy(features)
-

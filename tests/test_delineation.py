@@ -1,0 +1,36 @@
+import numpy as np
+
+from miclass3.delineation import extract_morphology_features
+from miclass3.morphology import LEADS
+
+
+def _gaussian(length, center, width):
+    x = np.arange(length)
+    return np.exp(-0.5 * ((x - center) / width) ** 2)
+
+
+def synthetic_stemi_record(fs=500, seconds=10):
+    n = fs * seconds
+    signal = np.zeros((n, len(LEADS)), dtype=float)
+    elevated = {LEADS.index("II"), LEADS.index("III"), LEADS.index("aVF")}
+    for r in range(fs, n - fs, fs):
+        signal += 0.03 * _gaussian(n, r - int(0.18 * fs), 18)[:, None]
+        for lead in range(len(LEADS)):
+            polarity = -1.0 if LEADS[lead] == "aVR" else 1.0
+            signal[:, lead] += polarity * 1.0 * _gaussian(n, r, 7)
+            signal[:, lead] -= polarity * 0.25 * _gaussian(n, r + 22, 8)
+            signal[:, lead] += 0.15 * _gaussian(n, r + int(0.28 * fs), 35)
+        start = r + int(0.06 * fs)
+        stop = r + int(0.18 * fs)
+        signal[start:stop, list(elevated)] += 0.18
+    return signal
+
+
+def test_extract_morphology_promotes_contiguous_st_elevation():
+    features, beats = extract_morphology_features(synthetic_stemi_record(), fs=500, age=60, sex="male")
+    assert features["num_beats_used"] >= 5
+    assert features["morphology_quality"] == "ok"
+    assert features["standard_stemi"] is True
+    assert features["lbbb"] is False
+    assert features["max_st_j_mv"] >= 0.1
+    assert {"r_sample", "q_peak_sample", "s_peak_sample", "qrs_onset_sample", "j_point_sample", "t_peak_sample"} <= set(beats[0])

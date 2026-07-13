@@ -43,6 +43,14 @@ pip install -e .
 
 The initial command downloads only PTB-XL metadata. Without morphology input it still produces a valid, conservative first manifest, but no record is promoted to `stemi_proxy` until the J-point/LBBB table is supplied.
 
+The recommended path is to extract morphology directly from PTB-XL `records500` first:
+
+```bash
+python scripts/extract_morphology.py --data-dir data/ptbxl --out data/morphology_features.csv --beats-out data/morphology_beats.csv --label-out data/label_manifest.csv
+```
+
+This writes the record-level morphology table, a beat-level P-QRS-T/J-point audit table, and the final training label manifest. See [the morphology extractor guide](docs/morphology_extractor.md).
+
 ```bash
 python scripts/build_labels.py --data-dir data/ptbxl --out data/label_manifest.csv
 python scripts/build_labels.py --data-dir data/ptbxl --morphology-csv data/morphology_features.csv --out data/label_manifest.csv
@@ -65,6 +73,8 @@ python scripts/train.py --model seresnet --device cpu --max-records 300
 ```
 
 For VS Code GPU setup, see [the GPU training guide](docs/vscode_gpu_training.md).
+
+For AI coding agents, start with [the AI agent runbook](docs/ai_agent_runbook.md). It gives the exact order for data checks, raw ECG morphology extraction, label manifest creation, GPU smoke testing, full training, and results reporting.
 
 The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every completed training run writes a complete results bundle under `artifacts/`:
 

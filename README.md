@@ -62,7 +62,15 @@ For a CPU pipeline check only:
 python scripts/train.py --model seresnet --device cpu --max-records 300
 ```
 
-The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Report macro-AUROC, macro-AUPRC, macro-F1, balanced accuracy, per-class recall, confusion matrix, calibration, and specifically STEMI-proxy recall. Never report the test result as clinical NSTEMI diagnostic accuracy.
+The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every completed training run writes a complete results bundle under `artifacts/`:
+
+- `train|val|test_metrics.json`: accuracy, balanced accuracy, macro-AUROC, macro-AUPRC, macro-F1, STEMI-proxy recall, sample count, and the raw confusion matrix.
+- `train|val|test_classification_report.csv`: precision, recall/sensitivity, specificity, F1, and support for each class.
+- `train|val|test_confusion_matrix.csv` and `.png`: labelled numerical and publication-ready confusion matrices.
+- `train|val|test_predictions.csv`: every prediction, the three probabilities, and ECG/patient/fold identifiers for audit.
+- `best_model.pt` and `metrics.json`: selected model state and epoch history.
+
+Never report the test result as clinical NSTEMI diagnostic accuracy.
 
 ## Research safeguards
 

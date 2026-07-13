@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from miclass3.data import PTBXL500Dataset
-from miclass3.metrics import multiclass_metrics
+from miclass3.metrics import multiclass_metrics, write_split_artifacts
 from miclass3.models import make_model
 
 
@@ -45,6 +45,7 @@ def main() -> None:
     subsets = {"train": manifest[manifest.strat_fold.isin(folds["train_folds"])], "val": manifest[manifest.strat_fold.isin(folds["val_folds"])], "test": manifest[manifest.strat_fold.isin(folds["test_folds"])]}
     data_dir = ROOT / folds["data_dir"]
     loaders = {name: DataLoader(PTBXL500Dataset(frame, data_dir, feature_columns), batch_size=cfg["training"]["batch_size"], shuffle=name == "train", num_workers=cfg["training"]["num_workers"]) for name, frame in subsets.items()}
+    evaluation_loaders = {name: DataLoader(PTBXL500Dataset(frame, data_dir, feature_columns), batch_size=cfg["training"]["batch_size"], shuffle=False, num_workers=cfg["training"]["num_workers"]) for name, frame in subsets.items()}
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device if args.device != "auto" else "cpu")
     model = make_model(args.model or cfg["models"]["primary"], len(feature_columns)).to(device)
     counts = subsets["train"].label_id.value_counts().reindex([0, 1, 2], fill_value=1).to_numpy()
@@ -66,13 +67,13 @@ def main() -> None:
         else: stale += 1
         if stale >= cfg["training"]["patience"]: break
     model.load_state_dict(best_state); results={}
-    for split, loader in loaders.items():
-        y, prob = predict(model, loader, device); results[split] = multiclass_metrics(y, prob)
     out = ROOT / args.out_dir; out.mkdir(parents=True, exist_ok=True)
+    for split, loader in evaluation_loaders.items():
+        y, prob = predict(model, loader, device)
+        results[split] = write_split_artifacts(out, split, y, prob, subsets[split])
     torch.save({"state_dict": model.state_dict(), "feature_columns": feature_columns, "config": cfg}, out / "best_model.pt")
     (out / "metrics.json").write_text(json.dumps({"history": history, "results": results}, indent=2), encoding="utf-8")
     print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__": main()
-

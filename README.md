@@ -8,6 +8,8 @@
 
 The third class is deliberately named **NSTEMI-proxy** in code and reporting. PTB-XL does not contain serial troponin, symptoms, coronary angiography, or adjudicated encounter diagnoses, so it cannot establish clinical NSTEMI. See [the full label specification](docs/label_specification.md).
 
+![Miclass3 PTB-XL proxy labeling flow](docs/assets/labeling_flow.svg)
+
 ## Architecture
 
 ```text
@@ -61,6 +63,8 @@ For a CPU pipeline check only:
 ```bash
 python scripts/train.py --model seresnet --device cpu --max-records 300
 ```
+
+For VS Code GPU setup, see [the GPU training guide](docs/vscode_gpu_training.md).
 
 The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every completed training run writes a complete results bundle under `artifacts/`:
 

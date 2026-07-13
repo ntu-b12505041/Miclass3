@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="1120" viewBox="0 0 1120 1120" role="img" aria-labelledby="title desc">
+  <title id="title">Miclass3 PTB-XL MI proxy labeling flow</title>
+  <desc id="desc">Decision flow for assigning non_mi, stemi_proxy, nstemi_proxy, and exclude_old_mi labels from PTB-XL SCP codes and ECG morphology.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#333"/>
+    </marker>
+    <style>
+      .title { font: 700 28px Arial, Helvetica, sans-serif; fill: #111; }
+      .subtitle { font: 400 16px Arial, Helvetica, sans-serif; fill: #555; }
+      .box { fill: #fff; stroke: #333; stroke-width: 2; rx: 10; }
+      .decision { fill: #fff; stroke: #333; stroke-width: 2; }
+      .output { fill: #eef5ff; stroke: #1f5fbf; stroke-width: 2; rx: 10; }
+      .exclude { fill: #f6f6f6; stroke: #666; stroke-width: 2; rx: 10; }
+      .text { font: 600 18px Arial, Helvetica, sans-serif; fill: #111; text-anchor: middle; dominant-baseline: middle; }
+      .small { font: 400 14px Arial, Helvetica, sans-serif; fill: #444; text-anchor: middle; dominant-baseline: middle; }
+      .label { font: 700 14px Arial, Helvetica, sans-serif; fill: #333; text-anchor: middle; dominant-baseline: middle; }
+      .line { fill: none; stroke: #333; stroke-width: 2; marker-end: url(#arrow); }
+      .thin { fill: none; stroke: #777; stroke-width: 1.5; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1120" height="1120" fill="#ffffff"/>
+  <text x="560" y="48" class="title" text-anchor="middle">PTB-XL Three-Class MI Proxy Labeling Flow</text>
+  <text x="560" y="78" class="subtitle" text-anchor="middle">Non-MI / STEMI-proxy / NSTEMI-proxy, with old MI excluded from training</text>
+
+  <rect x="410" y="115" width="300" height="68" class="box"/>
+  <text x="560" y="142" class="text">PTB-XL record</text>
+  <text x="560" y="166" class="small">records500 waveform + metadata</text>
+
+  <line x1="560" y1="183" x2="560" y2="225" class="line"/>
+
+  <rect x="410" y="225" width="300" height="68" class="box"/>
+  <text x="560" y="252" class="text">Read scp_codes</text>
+  <text x="560" y="276" class="small">diagnostic SCP statements</text>
+
+  <line x1="560" y1="293" x2="560" y2="340" class="line"/>
+
+  <polygon points="560,340 725,420 560,500 395,420" class="decision"/>
+  <text x="560" y="409" class="text">Any MI code?</text>
+  <text x="560" y="434" class="small">acute or infarction SCP statement</text>
+
+  <line x1="395" y1="420" x2="255" y2="420" class="line"/>
+  <text x="330" y="401" class="label">No</text>
+  <rect x="55" y="386" width="200" height="68" class="output"/>
+  <text x="155" y="414" class="text">non_mi</text>
+  <text x="155" y="438" class="small">class 0</text>
+
+  <line x1="560" y1="500" x2="560" y2="545" class="line"/>
+  <text x="587" y="523" class="label">Yes</text>
+
+  <polygon points="560,545 735,625 560,705 385,625" class="decision"/>
+  <text x="560" y="614" class="text">Old MI / old infarction?</text>
+  <text x="560" y="639" class="small">chronic infarct pattern, not acute target</text>
+
+  <line x1="735" y1="625" x2="875" y2="625" class="line"/>
+  <text x="805" y="606" class="label">Yes</text>
+  <rect x="875" y="591" width="200" height="68" class="exclude"/>
+  <text x="975" y="619" class="text">exclude_old_mi</text>
+  <text x="975" y="643" class="small">not used for training</text>
+
+  <line x1="560" y1="705" x2="560" y2="750" class="line"/>
+  <text x="587" y="728" class="label">No</text>
+
+  <polygon points="560,750 725,830 560,910 395,830" class="decision"/>
+  <text x="560" y="819" class="text">LBBB present?</text>
+  <text x="560" y="844" class="small">route to modified Sgarbossa</text>
+
+  <line x1="395" y1="830" x2="220" y2="830" class="line"/>
+  <text x="305" y="811" class="label">No</text>
+
+  <polygon points="220,750 385,830 220,910 55,830" class="decision"/>
+  <text x="220" y="819" class="text">Standard STEMI</text>
+  <text x="220" y="844" class="small">J-point criteria positive?</text>
+
+  <line x1="220" y1="750" x2="220" y2="675" class="line"/>
+  <text x="247" y="713" class="label">Yes</text>
+  <rect x="120" y="607" width="200" height="68" class="output"/>
+  <text x="220" y="635" class="text">stemi_proxy</text>
+  <text x="220" y="659" class="small">MI + STEMI morphology</text>
+
+  <line x1="220" y1="910" x2="220" y2="985" class="line"/>
+  <text x="247" y="948" class="label">No</text>
+  <rect x="120" y="985" width="200" height="68" class="output"/>
+  <text x="220" y="1013" class="text">nstemi_proxy</text>
+  <text x="220" y="1037" class="small">MI without STEMI pattern</text>
+
+  <line x1="725" y1="830" x2="900" y2="830" class="line"/>
+  <text x="815" y="811" class="label">Yes</text>
+
+  <polygon points="900,750 1065,830 900,910 735,830" class="decision"/>
+  <text x="900" y="819" class="text">Modified Sgarbossa</text>
+  <text x="900" y="844" class="small">positive?</text>
+
+  <line x1="900" y1="750" x2="900" y2="675" class="line"/>
+  <text x="927" y="713" class="label">Yes</text>
+  <rect x="800" y="607" width="200" height="68" class="output"/>
+  <text x="900" y="635" class="text">stemi_proxy</text>
+  <text x="900" y="659" class="small">LBBB + mSgarbossa</text>
+
+  <line x1="900" y1="910" x2="900" y2="985" class="line"/>
+  <text x="927" y="948" class="label">No</text>
+  <rect x="800" y="985" width="200" height="68" class="output"/>
+  <text x="900" y="1013" class="text">nstemi_proxy</text>
+  <text x="900" y="1037" class="small">MI without STEMI equivalent</text>
+</svg>

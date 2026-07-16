@@ -12,6 +12,18 @@ Small check:
 python scripts/extract_morphology.py --data-dir data/ptbxl --max-records 20 --out data/morphology_features_debug.csv --beats-out data/morphology_beats_debug.csv --skip-labels
 ```
 
+Use NeuroKit2 for P-QRS-T fiducial points:
+
+```powershell
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend neurokit --out data/morphology_features_neurokit.csv --beats-out data/morphology_beats_neurokit.csv --label-out data/label_manifest_neurokit.csv
+```
+
+Use ECGdeli fiducial points exported from MATLAB/Octave:
+
+```powershell
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend ecgdeli --ecgdeli-fiducials data/ecgdeli_fiducials.csv --out data/morphology_features_ecgdeli.csv --beats-out data/morphology_beats_ecgdeli.csv --label-out data/label_manifest_ecgdeli.csv
+```
+
 Full extraction and label manifest build:
 
 ```powershell
@@ -32,18 +44,24 @@ python scripts/extract_morphology.py --data-dir data/ptbxl --folds 9,10 --out da
 
 ## Method
 
-For each ECG:
+For each ECG, the extractor first obtains P-QRS-T/fiducial points from the selected backend:
+
+- `custom`: the original dependency-light Python detector.
+- `neurokit`: NeuroKit2 ECG cleaning, R-peak detection, and DWT delineation on lead II.
+- `ecgdeli`: normalized fiducial samples exported from ECGdeli.
+- `auto`: try NeuroKit2 first, then fall back to `custom` if NeuroKit2 fails.
+
+Only fiducial point acquisition changes between backends. The downstream PR/TP baseline, J-point ST measurement, contiguous-lead STEMI rule, LBBB routing, modified Sgarbossa rule, and label manifest generation are unchanged.
+
+For each ECG after fiducials are available:
 
 1. Read the raw 500 Hz 12-lead WFDB record from `filename_hr`.
-2. Bandpass filter a copy of the signal at 5-25 Hz for QRS detection.
-3. Build a multi-lead QRS energy envelope and detect R peaks.
-4. Refine QRS onset and QRS offset around each R peak.
-5. Use QRS offset as the J point.
-6. Estimate PR baseline from 80-20 ms before QRS onset; fall back to TP/pre-QRS baseline if needed.
-7. Measure ST displacement at J and J+60 ms for every lead.
-8. Mark P, Q, S, and T peaks in lead II search windows for audit.
-9. Aggregate clean beats by median per lead.
-10. Emit STEMI and LBBB/modified-Sgarbossa features.
+2. Use QRS offset as the J point.
+3. Estimate PR baseline from 80-20 ms before QRS onset; fall back to TP/pre-QRS baseline if needed.
+4. Measure ST displacement at J and J+60 ms for every lead.
+5. Keep P, Q, S, and T peaks in lead II for audit.
+6. Aggregate clean beats by median per lead.
+7. Emit STEMI and LBBB/modified-Sgarbossa features.
 
 Standard STEMI is positive when at least two contiguous leads exceed the guideline J-point threshold. LBBB is conservatively detected from raw morphology by QRS duration >=120 ms, negative V1, and positive lateral leads, and can also use PTB-XL SCP LBBB statements. For LBBB, STEMI-equivalent morphology is decided by modified Sgarbossa rather than ordinary ST elevation.
 
@@ -64,6 +82,8 @@ Standard STEMI is positive when at least two contiguous leads exceed the guideli
 - `num_beats_used`
 - `morphology_quality`
 - `st_j_<lead>_mv`, `st_j60_<lead>_mv`, `s_depth_<lead>_mv`, `qrs_polarity_<lead>`
+- `requested_delineation_backend`
+- `delineation_backend`
 
 `data/morphology_beats.csv` is one row per accepted beat. It keeps the P-QRS-T/J-point landmarks:
 
@@ -77,6 +97,16 @@ Standard STEMI is positive when at least two contiguous leads exceed the guideli
 - `t_peak_sample`
 - relative timings in milliseconds from R peak
 - `baseline_source`
+- `delineation_backend`
+- `fiducial_source`
+
+The normalized ECGdeli CSV must contain one row per beat with `ecg_id` and these sample columns when available:
+
+```text
+beat_index,r_sample,qrs_onset_sample,qrs_offset_sample,p_peak_sample,q_peak_sample,s_peak_sample,t_peak_sample
+```
+
+`r_sample`, `qrs_onset_sample`, and `qrs_offset_sample` are the critical columns. Missing P/Q/S/T peak columns are filled by the same local lead-II audit windows used by the custom backend.
 
 If `--label-out` is enabled, the extractor also writes `data/label_manifest.csv`. The manifest merges PTB-XL metadata with `morphology_features.csv`, then applies the final labels used by training.
 

@@ -4,6 +4,8 @@ import argparse
 import json
 import random
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -18,6 +20,11 @@ sys.path.insert(0, str(ROOT / "src"))
 from miclass3.data import PTBXL500Dataset
 from miclass3.metrics import classification_tables, multiclass_metrics, write_split_artifacts
 from miclass3.models import make_model
+
+
+def sync_device(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
 
 
 def predict(model, loader, device):
@@ -86,6 +93,8 @@ def calibrate_stemi_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> 
 
 
 def main() -> None:
+    run_start = time.perf_counter()
+    run_started_at_utc = datetime.now(timezone.utc).isoformat()
     p = argparse.ArgumentParser(description="Train one selected records500 Miclass3 model.")
     p.add_argument("--config", default="configs/default.yaml"); p.add_argument("--manifest", default="data/label_manifest.csv")
     p.add_argument("--model", choices=["morphology_fusion", "inceptiontime", "seresnet"])
@@ -144,7 +153,11 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["training"]["learning_rate"], weight_decay=cfg["training"]["weight_decay"])
     best, best_state, stale = -np.inf, None, 0
     history=[]
+    fit_start = time.perf_counter()
+    fit_started_at_utc = datetime.now(timezone.utc).isoformat()
     for epoch in range(1, cfg["training"]["epochs"] + 1):
+        sync_device(device)
+        epoch_start = time.perf_counter()
         model.train(); losses=[]
         for x, y, f in loaders["train"]:
             outputs = model(x.to(device), f.to(device)); loss = criterion(outputs["class_logits"], y.to(device))
@@ -155,28 +168,48 @@ def main() -> None:
                 lbbb_target = f[:, lbbb_feature_index].to(device).clamp(0, 1)
                 loss = loss + training_cfg.get("lbbb_auxiliary_weight", 0.0) * lbbb_criterion(outputs["lbbb_logits"], lbbb_target)
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step(); losses.append(loss.item())
-        yv, pv = predict(model, loaders["val"], device); metrics = multiclass_metrics(yv, pv); metrics.update(epoch=epoch, loss=float(np.mean(losses))); history.append(metrics)
+        sync_device(device)
+        train_seconds = time.perf_counter() - epoch_start
+        val_start = time.perf_counter()
+        yv, pv = predict(model, loaders["val"], device); metrics = multiclass_metrics(yv, pv); metrics.update(epoch=epoch, loss=float(np.mean(losses)))
+        sync_device(device)
+        val_seconds = time.perf_counter() - val_start
+        epoch_seconds = time.perf_counter() - epoch_start
+        metrics.update(epoch_seconds=epoch_seconds, train_seconds=train_seconds, val_seconds=val_seconds)
+        history.append(metrics)
         score = metrics["macro_auprc"]
-        print(f"epoch={epoch} loss={metrics['loss']:.4f} val_macro_auprc={score:.4f}")
+        print(f"epoch={epoch} loss={metrics['loss']:.4f} val_macro_auprc={score:.4f} epoch_seconds={epoch_seconds:.1f}")
         if score > best: best, stale, best_state = score, 0, {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         else: stale += 1
         if stale >= cfg["training"]["patience"]: break
+    sync_device(device)
+    fit_wall_clock_seconds = time.perf_counter() - fit_start
     model.load_state_dict(best_state); results={}
     threshold = None
+    threshold_calibration_seconds = None
     if bool(cfg.get("metrics", {}).get("calibrate_stemi_threshold", True)):
+        threshold_start = time.perf_counter()
         yv, pv = predict(model, loaders["val"], device)
         threshold, threshold_score = calibrate_stemi_threshold(yv, pv)
+        sync_device(device)
+        threshold_calibration_seconds = time.perf_counter() - threshold_start
     else:
         threshold_score = None
     out = ROOT / args.out_dir; out.mkdir(parents=True, exist_ok=True)
+    evaluation_seconds_by_split = {}
     for split, loader in loaders.items():
         if split == "train":
             # Re-evaluate train deterministically; the training sampler is not
             # used for reporting and should not change the reported support.
             loader = DataLoader(datasets[split], batch_size=cfg["training"]["batch_size"], shuffle=False, num_workers=cfg["training"]["num_workers"])
+        eval_start = time.perf_counter()
         y, prob = predict(model, loader, device)
+        sync_device(device)
         results[split] = write_split_artifacts(out, split, y, prob, subsets[split], threshold)
+        evaluation_seconds_by_split[split] = time.perf_counter() - eval_start
     torch.save({"state_dict": model.state_dict(), "feature_columns": feature_columns, "config": cfg}, out / "best_model.pt")
+    epoch_times = [float(row["epoch_seconds"]) for row in history]
+    total_wall_clock_seconds = time.perf_counter() - run_start
     training_summary = {
         "train_class_counts": {str(i): int(counts[i]) for i in range(3)},
         "class_weights": {str(i): float(class_weights[i]) for i in range(3)},
@@ -188,6 +221,17 @@ def main() -> None:
         "lbbb_auxiliary_pos_weight": lbbb_pos_weight,
         "stemi_threshold": threshold,
         "validation_macro_f1_at_threshold": threshold_score,
+        "timing": {
+            "run_started_at_utc": run_started_at_utc,
+            "fit_started_at_utc": fit_started_at_utc,
+            "fit_wall_clock_seconds": float(fit_wall_clock_seconds),
+            "total_wall_clock_seconds": float(total_wall_clock_seconds),
+            "epochs_completed": int(len(history)),
+            "mean_epoch_seconds": float(np.mean(epoch_times)) if epoch_times else None,
+            "median_epoch_seconds": float(np.median(epoch_times)) if epoch_times else None,
+            "threshold_calibration_seconds": None if threshold_calibration_seconds is None else float(threshold_calibration_seconds),
+            "evaluation_seconds_by_split": {name: float(seconds) for name, seconds in evaluation_seconds_by_split.items()},
+        },
     }
     (out / "metrics.json").write_text(json.dumps({"history": history, "results": results, "training": training_summary}, indent=2), encoding="utf-8")
     print(json.dumps(results, indent=2))

@@ -34,3 +34,36 @@ def test_extract_morphology_promotes_contiguous_st_elevation():
     assert features["lbbb"] is False
     assert features["max_st_j_mv"] >= 0.1
     assert {"r_sample", "q_peak_sample", "s_peak_sample", "qrs_onset_sample", "j_point_sample", "t_peak_sample"} <= set(beats[0])
+
+
+def test_ecgdeli_backend_uses_external_fiducials_without_changing_label_rules():
+    fs = 500
+    signal = synthetic_stemi_record(fs=fs)
+    fiducials = []
+    for beat_index, r in enumerate(range(fs, fs * 9, fs)):
+        fiducials.append(
+            {
+                "beat_index": beat_index,
+                "r_sample": r,
+                "qrs_onset_sample": r - 25,
+                "qrs_offset_sample": r + 40,
+                "p_peak_sample": r - 90,
+                "q_peak_sample": r - 12,
+                "s_peak_sample": r + 22,
+                "t_peak_sample": r + 140,
+            }
+        )
+
+    features, beats = extract_morphology_features(
+        signal,
+        fs=fs,
+        age=60,
+        sex="male",
+        backend="ecgdeli",
+        external_fiducials=fiducials,
+    )
+
+    assert features["requested_delineation_backend"] == "ecgdeli"
+    assert features["delineation_backend"] == "ecgdeli"
+    assert features["standard_stemi"] is True
+    assert beats[0]["fiducial_source"] == "ecgdeli"

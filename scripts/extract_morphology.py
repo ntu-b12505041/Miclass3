@@ -36,6 +36,20 @@ def _parse_ecg_ids(value: str | None) -> set[int] | None:
     return {int(item.strip()) for item in value.split(",") if item.strip()}
 
 
+def _load_ecgdeli_fiducials(path: Path | None) -> dict[int, list[dict[str, object]]]:
+    if path is None:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"ECGdeli fiducial CSV not found: {path}")
+    table = pd.read_csv(path)
+    if "ecg_id" not in table:
+        raise ValueError("ECGdeli fiducial CSV must include an ecg_id column")
+    return {
+        int(ecg_id): rows.drop(columns=["ecg_id"]).to_dict("records")
+        for ecg_id, rows in table.groupby("ecg_id", sort=False)
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Extract P-QRS-T/J-point morphology from PTB-XL records500.")
     parser.add_argument("--data-dir", default="data/ptbxl", help="PTB-XL root containing ptbxl_database.csv and records500/.")
@@ -47,6 +61,16 @@ def main() -> None:
     parser.add_argument("--ecg-ids", help="Comma-separated ECG IDs or a text file with one ECG ID per line.")
     parser.add_argument("--max-records", type=int, help="Debug limit after fold/ID filtering.")
     parser.add_argument("--lbbb-source", choices=["either", "raw", "scp"], default="either")
+    parser.add_argument(
+        "--backend",
+        choices=["custom", "neurokit", "ecgdeli", "auto"],
+        default="custom",
+        help="Fiducial point backend. Only P-QRS-T/J-point acquisition changes; label rules stay unchanged.",
+    )
+    parser.add_argument(
+        "--ecgdeli-fiducials",
+        help="Normalized ECGdeli fiducial CSV for --backend ecgdeli. Requires ecg_id plus sample columns.",
+    )
     parser.add_argument("--resume", action="store_true", help="Skip ECG IDs already present in --out.")
     args = parser.parse_args()
 
@@ -60,6 +84,7 @@ def main() -> None:
         meta = meta[meta["ecg_id"].isin(ecg_ids)].copy()
     if args.max_records:
         meta = meta.head(args.max_records).copy()
+    ecgdeli_fiducials = _load_ecgdeli_fiducials(_project_path(args.ecgdeli_fiducials) if args.ecgdeli_fiducials else None)
 
     out_path = _project_path(args.out)
     beats_path = _project_path(args.beats_out) if args.beats_out else None
@@ -89,6 +114,8 @@ def main() -> None:
                 sex=row.get("sex"),
                 metadata_row=row.to_dict(),
                 lbbb_source=args.lbbb_source,
+                backend=args.backend,
+                external_fiducials=ecgdeli_fiducials.get(ecg_id),
             )
             features.update({"ecg_id": ecg_id, "filename_hr": row["filename_hr"]})
             for beat in beats:

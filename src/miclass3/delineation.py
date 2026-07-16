@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-from typing import Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 from scipy.signal import butter, find_peaks, sosfiltfilt
@@ -11,6 +11,15 @@ from .morphology import LEADS, modified_sgarbossa_positive, standard_stemi_from_
 
 LEAD_INDEX = {lead: index for index, lead in enumerate(LEADS)}
 LATERAL_LEADS = ("I", "aVL", "V5", "V6")
+FIDUCIAL_SAMPLE_COLUMNS = (
+    "r_sample",
+    "q_peak_sample",
+    "s_peak_sample",
+    "qrs_onset_sample",
+    "qrs_offset_sample",
+    "p_peak_sample",
+    "t_peak_sample",
+)
 
 
 def _safe_filter(signal: np.ndarray, fs: int, low_hz: float, high_hz: float) -> np.ndarray:
@@ -152,6 +161,82 @@ def _dominant_polarity(values: list[int]) -> int:
     return 1 if sum(value > 0 for value in values) >= sum(value < 0 for value in values) else -1
 
 
+def _sample_or_none(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, float) and np.isnan(value):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _fiducials_from_custom(signal: np.ndarray, fs: int) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for beat_index, r_peak in enumerate(detect_r_peaks(signal, fs)):
+        onset, offset = locate_qrs_bounds(signal, fs, int(r_peak))
+        rows.append(
+            {
+                "beat_index": beat_index,
+                "r_sample": int(r_peak),
+                "qrs_onset_sample": int(onset),
+                "qrs_offset_sample": int(offset),
+                "fiducial_source": "custom",
+            }
+        )
+    return rows
+
+
+def _list_value(values: Mapping[str, Any], key: str, index: int) -> int | None:
+    series = values.get(key)
+    if series is None or index >= len(series):
+        return None
+    return _sample_or_none(series[index])
+
+
+def _fiducials_from_neurokit(signal: np.ndarray, fs: int) -> list[dict[str, object]]:
+    try:
+        import neurokit2 as nk
+    except ImportError as exc:
+        raise RuntimeError("NeuroKit2 backend requires `pip install neurokit2`.") from exc
+
+    lead_ii = signal[:, LEAD_INDEX["II"]]
+    cleaned = nk.ecg_clean(lead_ii, sampling_rate=fs, method="neurokit")
+    _, peak_info = nk.ecg_peaks(cleaned, sampling_rate=fs, method="neurokit")
+    r_peaks = np.asarray(peak_info.get("ECG_R_Peaks", []), dtype=int)
+    if r_peaks.size == 0:
+        raise ValueError("NeuroKit2 did not detect R peaks")
+
+    _, waves = nk.ecg_delineate(cleaned, rpeaks=r_peaks, sampling_rate=fs, method="dwt")
+    rows: list[dict[str, object]] = []
+    for beat_index, r_peak in enumerate(r_peaks):
+        rows.append(
+            {
+                "beat_index": beat_index,
+                "r_sample": int(r_peak),
+                "q_peak_sample": _list_value(waves, "ECG_Q_Peaks", beat_index),
+                "s_peak_sample": _list_value(waves, "ECG_S_Peaks", beat_index),
+                "qrs_onset_sample": _list_value(waves, "ECG_R_Onsets", beat_index),
+                "qrs_offset_sample": _list_value(waves, "ECG_R_Offsets", beat_index),
+                "p_peak_sample": _list_value(waves, "ECG_P_Peaks", beat_index),
+                "t_peak_sample": _list_value(waves, "ECG_T_Peaks", beat_index),
+                "fiducial_source": "neurokit",
+            }
+        )
+    return rows
+
+
+def _normalize_external_fiducials(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    normalized: list[dict[str, object]] = []
+    for index, row in enumerate(rows):
+        item: dict[str, object] = {"beat_index": row.get("beat_index", index), "fiducial_source": row.get("fiducial_source", "ecgdeli")}
+        for column in FIDUCIAL_SAMPLE_COLUMNS:
+            item[column] = _sample_or_none(row.get(column))
+        normalized.append(item)
+    return normalized
+
+
 def _metadata_has_lbbb(row: Mapping[str, object] | None) -> bool:
     if row is None:
         return False
@@ -174,24 +259,18 @@ def _raw_lbbb(qrs_duration_ms: float, polarities: dict[str, int]) -> bool:
     return bool(v1_negative and lateral_positive)
 
 
-def extract_morphology_features(
+def _extract_from_fiducials(
     signal: np.ndarray,
     fs: int,
+    fiducials: Sequence[Mapping[str, object]],
     age: float | None = None,
     sex: str | int | None = None,
     metadata_row: Mapping[str, object] | None = None,
     lbbb_source: str = "either",
+    backend: str = "custom",
+    requested_backend: str | None = None,
+    fallback_reason: str | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
-    """Extract ECG morphology features used by the MI proxy labeler.
-
-    Returns one record-level feature dict plus beat-level landmarks. Signal is
-    expected to be WFDB physical units in millivolts with shape
-    ``(samples, 12)`` in the PTB-XL lead order.
-    """
-    if signal.ndim != 2 or signal.shape[1] != len(LEADS):
-        raise ValueError(f"expected signal shape (samples, {len(LEADS)}), got {signal.shape}")
-
-    r_peaks = detect_r_peaks(signal, fs)
     per_beat_rows: list[dict[str, object]] = []
     st_j_by_lead = {lead: [] for lead in LEADS}
     st_j60_by_lead = {lead: [] for lead in LEADS}
@@ -200,13 +279,24 @@ def extract_morphology_features(
     qrs_durations: list[float] = []
     rr_ms: list[float] = []
 
+    r_peaks = [_sample_or_none(row.get("r_sample")) for row in fiducials]
+    r_peaks = [r_peak for r_peak in r_peaks if r_peak is not None]
     if len(r_peaks) >= 2:
-        rr_ms = (np.diff(r_peaks) / fs * 1000.0).tolist()
+        rr_ms = (np.diff(np.asarray(r_peaks, dtype=int)) / fs * 1000.0).tolist()
 
-    for beat_index, r_peak in enumerate(r_peaks):
+    for fallback_index, row in enumerate(fiducials):
+        beat_index = _sample_or_none(row.get("beat_index"))
+        if beat_index is None:
+            beat_index = fallback_index
+        r_peak = _sample_or_none(row.get("r_sample"))
+        if r_peak is None:
+            continue
         if r_peak < int(0.32 * fs) or r_peak > signal.shape[0] - int(0.50 * fs):
             continue
-        onset, offset = locate_qrs_bounds(signal, fs, int(r_peak))
+        onset = _sample_or_none(row.get("qrs_onset_sample"))
+        offset = _sample_or_none(row.get("qrs_offset_sample"))
+        if onset is None or offset is None:
+            onset, offset = locate_qrs_bounds(signal, fs, int(r_peak))
         if offset <= onset or offset - onset > int(0.22 * fs):
             continue
         baseline, baseline_source = _baseline_for_beat(signal, fs, onset, int(r_peak))
@@ -219,10 +309,18 @@ def extract_morphology_features(
         st_j = st_j - baseline
         st_j60 = st_j60 - baseline
         polarity, s_depth = _polarity_and_s_depth(signal, onset, offset, baseline)
-        q_peak = _lead_window_minimum(signal, LEAD_INDEX["II"], onset, int(r_peak), baseline[LEAD_INDEX["II"]])
-        s_peak = _lead_window_minimum(signal, LEAD_INDEX["II"], int(r_peak), offset, baseline[LEAD_INDEX["II"]])
-        p_peak = _lead_window_peak(signal, LEAD_INDEX["II"], onset - int(0.22 * fs), onset - int(0.06 * fs), baseline[LEAD_INDEX["II"]])
-        t_peak = _lead_window_peak(signal, LEAD_INDEX["II"], offset + int(0.08 * fs), offset + int(0.42 * fs), baseline[LEAD_INDEX["II"]])
+        q_peak = _sample_or_none(row.get("q_peak_sample"))
+        s_peak = _sample_or_none(row.get("s_peak_sample"))
+        p_peak = _sample_or_none(row.get("p_peak_sample"))
+        t_peak = _sample_or_none(row.get("t_peak_sample"))
+        if q_peak is None:
+            q_peak = _lead_window_minimum(signal, LEAD_INDEX["II"], onset, int(r_peak), baseline[LEAD_INDEX["II"]])
+        if s_peak is None:
+            s_peak = _lead_window_minimum(signal, LEAD_INDEX["II"], int(r_peak), offset, baseline[LEAD_INDEX["II"]])
+        if p_peak is None:
+            p_peak = _lead_window_peak(signal, LEAD_INDEX["II"], onset - int(0.22 * fs), onset - int(0.06 * fs), baseline[LEAD_INDEX["II"]])
+        if t_peak is None:
+            t_peak = _lead_window_peak(signal, LEAD_INDEX["II"], offset + int(0.08 * fs), offset + int(0.42 * fs), baseline[LEAD_INDEX["II"]])
         qrs_duration_ms = (offset - onset) / fs * 1000.0
         qrs_durations.append(qrs_duration_ms)
         for lead in LEADS:
@@ -251,6 +349,8 @@ def extract_morphology_features(
                 "j_point_rel_ms": (j_point - r_peak) / fs * 1000.0,
                 "t_peak_rel_ms": None if t_peak is None else (t_peak - r_peak) / fs * 1000.0,
                 "baseline_source": baseline_source,
+                "delineation_backend": backend,
+                "fiducial_source": row.get("fiducial_source", backend),
             }
         )
 
@@ -290,6 +390,8 @@ def extract_morphology_features(
     ]
     used = len(qrs_durations)
     feature_row: dict[str, object] = {
+        "requested_delineation_backend": requested_backend or backend,
+        "delineation_backend": backend,
         "standard_stemi": bool(standard_stemi),
         "lbbb": bool(lbbb),
         "lbbb_raw": bool(raw_lbbb),
@@ -305,6 +407,8 @@ def extract_morphology_features(
         "median_heart_rate_bpm": float(60000.0 / np.nanmedian(rr_ms)) if rr_ms else float("nan"),
         "morphology_quality": "ok" if used >= 3 else "low_beat_count",
     }
+    if fallback_reason:
+        feature_row["delineation_fallback_reason"] = fallback_reason
     for name in ("p_peak_rel_ms", "q_peak_rel_ms", "s_peak_rel_ms", "qrs_onset_rel_ms", "qrs_offset_rel_ms", "j_point_rel_ms", "t_peak_rel_ms"):
         values = [row[name] for row in per_beat_rows if row[name] is not None]
         feature_row[f"median_{name}"] = float(np.nanmedian(values)) if values else float("nan")
@@ -316,3 +420,57 @@ def extract_morphology_features(
         feature_row[f"qrs_polarity_{safe}"] = median_polarity[lead]
 
     return feature_row, per_beat_rows
+
+
+def extract_morphology_features(
+    signal: np.ndarray,
+    fs: int,
+    age: float | None = None,
+    sex: str | int | None = None,
+    metadata_row: Mapping[str, object] | None = None,
+    lbbb_source: str = "either",
+    backend: str = "custom",
+    external_fiducials: Sequence[Mapping[str, object]] | None = None,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Extract ECG morphology features used by the MI proxy labeler.
+
+    ``backend`` controls only P-QRS-T/fiducial point acquisition. The downstream
+    ST elevation, LBBB, modified Sgarbossa and label-facing feature rules remain
+    identical across backends.
+    """
+    if signal.ndim != 2 or signal.shape[1] != len(LEADS):
+        raise ValueError(f"expected signal shape (samples, {len(LEADS)}), got {signal.shape}")
+    if backend not in {"custom", "neurokit", "ecgdeli", "auto"}:
+        raise ValueError(f"unsupported delineation backend: {backend}")
+
+    fallback_reason: str | None = None
+    actual_backend = backend
+    if backend == "custom":
+        fiducials = _fiducials_from_custom(signal, fs)
+    elif backend == "neurokit":
+        fiducials = _fiducials_from_neurokit(signal, fs)
+    elif backend == "ecgdeli":
+        if external_fiducials is None:
+            raise ValueError("ECGdeli backend requires external_fiducials from --ecgdeli-fiducials")
+        fiducials = _normalize_external_fiducials(external_fiducials)
+    else:
+        try:
+            fiducials = _fiducials_from_neurokit(signal, fs)
+            actual_backend = "neurokit"
+        except Exception as exc:
+            fiducials = _fiducials_from_custom(signal, fs)
+            actual_backend = "custom"
+            fallback_reason = f"{type(exc).__name__}: {exc}"
+
+    return _extract_from_fiducials(
+        signal,
+        fs=fs,
+        fiducials=fiducials,
+        age=age,
+        sex=sex,
+        metadata_row=metadata_row,
+        lbbb_source=lbbb_source,
+        backend=actual_backend,
+        requested_backend=backend,
+        fallback_reason=fallback_reason,
+    )

@@ -62,6 +62,16 @@ Extract morphology from raw ECG and build labels:
 python scripts/extract_morphology.py --data-dir data/ptbxl --out data/morphology_features.csv --beats-out data/morphology_beats.csv --label-out data/label_manifest.csv
 ```
 
+The extractor supports interchangeable fiducial backends:
+
+```powershell
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend custom --out data/morphology_features_custom.csv --beats-out data/morphology_beats_custom.csv --label-out data/label_manifest_custom.csv
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend neurokit --out data/morphology_features_neurokit.csv --beats-out data/morphology_beats_neurokit.csv --label-out data/label_manifest_neurokit.csv
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend ecgdeli --ecgdeli-fiducials data/ecgdeli_fiducials.csv --out data/morphology_features_ecgdeli.csv --beats-out data/morphology_beats_ecgdeli.csv --label-out data/label_manifest_ecgdeli.csv
+```
+
+Changing `--backend` changes only P-QRS-T/fiducial point acquisition. Do not change the downstream STEMI, LBBB, modified Sgarbossa, old-MI exclusion, or NSTEMI-proxy rules when comparing backends.
+
 The extractor writes:
 
 - `data/morphology_features.csv`: one row per ECG for record-level labeling and model fusion features.
@@ -118,18 +128,17 @@ src/miclass3/delineation.py
 scripts/extract_morphology.py
 ```
 
-It performs:
+It supports `custom`, `neurokit`, `ecgdeli`, and `auto` fiducial backends. ECGdeli is integrated as a normalized fiducial CSV import because ECGdeli itself is a MATLAB toolbox.
 
-1. Multi-lead QRS energy detection.
-2. R peak detection.
-3. QRS onset and offset localization.
-4. J point assignment at QRS offset.
-5. PR baseline estimation, with TP/pre-QRS fallback.
-6. ST-J and ST-J+60 measurement for all leads.
-7. P, Q, S, and T peak audit marks in lead II.
-8. Beat-level median aggregation into record-level morphology features.
-9. Standard STEMI contiguous-lead J-point decision.
-10. LBBB routing through modified Sgarbossa.
+After fiducial points are available, it performs:
+
+1. J point assignment at QRS offset.
+2. PR baseline estimation, with TP/pre-QRS fallback.
+3. ST-J and ST-J+60 measurement for all leads.
+4. P, Q, S, and T peak audit marks in lead II.
+5. Beat-level median aggregation into record-level morphology features.
+6. Standard STEMI contiguous-lead J-point decision.
+7. LBBB routing through modified Sgarbossa.
 
 Important columns in `morphology_features.csv`:
 
@@ -144,6 +153,8 @@ max_st_j60_mv
 max_st_s_ratio
 qrs_duration_ms
 morphology_quality
+requested_delineation_backend
+delineation_backend
 ```
 
 If `morphology_quality` is a failure value such as `load_error`, MI records must be excluded as `exclude_morphology_failed`, not converted to `nstemi_proxy`.
@@ -162,7 +173,10 @@ Every completed training run writes:
 
 `metrics.json` also records the training class counts, class weights,
 sampling strategy, auxiliary STEMI positive weight, and the frozen validation
-STEMI threshold.  Do not tune that threshold on the test fold.
+STEMI threshold. It also records training timing under
+`training.timing`, including fit wall-clock seconds, total run seconds, per
+split evaluation seconds, threshold calibration seconds, and mean/median epoch
+seconds. Do not tune that threshold on the test fold.
 
 When reporting results, read the test files from the selected artifact directory, usually:
 

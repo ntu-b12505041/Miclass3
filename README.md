@@ -49,6 +49,15 @@ The recommended path is to extract morphology directly from PTB-XL `records500` 
 python scripts/extract_morphology.py --data-dir data/ptbxl --out data/morphology_features.csv --beats-out data/morphology_beats.csv --label-out data/label_manifest.csv
 ```
 
+To compare fiducial detectors without changing label rules, run separate manifests:
+
+```bash
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend neurokit --out data/morphology_features_neurokit.csv --beats-out data/morphology_beats_neurokit.csv --label-out data/label_manifest_neurokit.csv
+python scripts/extract_morphology.py --data-dir data/ptbxl --backend ecgdeli --ecgdeli-fiducials data/ecgdeli_fiducials.csv --out data/morphology_features_ecgdeli.csv --beats-out data/morphology_beats_ecgdeli.csv --label-out data/label_manifest_ecgdeli.csv
+```
+
+`--backend` changes only P-QRS-T/fiducial point acquisition. The downstream J-point STEMI rule, LBBB routing, modified Sgarbossa rule, old-MI exclusion, and NSTEMI-proxy rule stay unchanged.
+
 This writes the record-level morphology table, a beat-level P-QRS-T/J-point audit table, and the final training label manifest. See [the morphology extractor guide](docs/morphology_extractor.md).
 
 ```bash
@@ -82,7 +91,7 @@ The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every
 - `train|val|test_classification_report.csv`: precision, recall/sensitivity, specificity, F1, and support for each class.
 - `train|val|test_confusion_matrix.csv` and `.png`: labelled numerical and publication-ready confusion matrices.
 - `train|val|test_predictions.csv`: every prediction, the three probabilities, and ECG/patient/fold identifiers for audit.
-- `best_model.pt` and `metrics.json`: selected model state and epoch history.
+- `best_model.pt` and `metrics.json`: selected model state, epoch history, imbalance settings, calibrated threshold, and training timing.
 
 The default configuration also uses moderate square-root class-aware
 sampling, softened inverse-frequency loss weights, and a weighted STEMI

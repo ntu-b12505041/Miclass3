@@ -10,16 +10,12 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import torch
 import yaml
-from torch import nn
-from torch.utils.data import DataLoader, WeightedRandomSampler
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from miclass3.data import PTBXL500Dataset
-from miclass3.metrics import classification_tables, multiclass_metrics, write_split_artifacts
-from miclass3.models import make_model
+from miclass3.data import FeatureTransform, PTBXL500Dataset, select_model_features
+from miclass3.metrics import calibrate_stemi_threshold, multiclass_metrics, write_split_artifacts
 
 
 def sync_device(device: torch.device) -> None:
@@ -130,17 +126,8 @@ def subsample_majority_class(
     return sampled.reset_index(drop=True), info
 
 
-def calibrate_stemi_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> tuple[float, float]:
-    """Select a STEMI threshold on validation data by macro-F1."""
-    best_threshold, best_score = 0.5, -np.inf
-    for threshold in np.arange(0.05, 0.96, 0.01):
-        score = float(classification_tables(y_true, probabilities, float(threshold))[0]["macro_f1"])
-        if score > best_score:
-            best_threshold, best_score = float(threshold), score
-    return best_threshold, best_score
-
-
 def main() -> None:
+    global torch, nn, F, DataLoader, WeightedRandomSampler, make_model
     run_start = time.perf_counter()
     run_started_at_utc = datetime.now(timezone.utc).isoformat()
     p = argparse.ArgumentParser(description="Train one selected records500 Miclass3 model.")
@@ -148,14 +135,36 @@ def main() -> None:
     p.add_argument("--model", choices=["morphology_fusion", "inceptiontime", "seresnet"])
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"]); p.add_argument("--max-records", type=int)
     p.add_argument("--out-dir", default="artifacts")
+    p.add_argument(
+        "--skip-test",
+        action="store_true",
+        help="Write train/validation artifacts only; use during validation-only hyperparameter tuning.",
+    )
     args = p.parse_args(); cfg = yaml.safe_load((ROOT / args.config).read_text())
+    folds = cfg["data"]
+    data_dir = ROOT / folds["data_dir"]
+    records500 = data_dir / "records500"
+    if not records500.is_dir():
+        raise FileNotFoundError(
+            f"Missing raw PTB-XL records500 at {records500}. Download the official data before training."
+        )
+    try:
+        import torch
+        from torch import nn
+        from torch.nn import functional as F
+        from torch.utils.data import DataLoader, WeightedRandomSampler
+        from miclass3.models import make_model
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "PyTorch is required for training. Install the project's requirements first."
+        ) from exc
     seed = int(cfg["seed"]); random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     manifest = pd.read_csv(ROOT / args.manifest).query("label_tier != 'excluded' and label_id.notna()", engine="python").copy()
     manifest["label_id"] = manifest["label_id"].astype(int)
     if args.max_records: manifest = manifest.groupby(["strat_fold", "label_id"], group_keys=False).apply(lambda x: x.sample(min(len(x), max(1, args.max_records // 30)), random_state=seed))
-    feature_columns = [c for c in ("max_st_j_mv", "max_st_j60_mv", "max_st_s_ratio", "qrs_duration_ms", "lbbb", "modified_sgarbossa_positive") if c in manifest]
+    feature_profile = str(cfg["training"].get("feature_profile", "core"))
+    feature_columns = select_model_features(manifest, feature_profile)
     lbbb_feature_index = feature_columns.index("lbbb") if "lbbb" in feature_columns else None
-    folds = cfg["data"]
     subsets = {
         "train": manifest[manifest.strat_fold.isin(folds["train_folds"])].copy(),
         "val": manifest[manifest.strat_fold.isin(folds["val_folds"])].copy(),
@@ -164,8 +173,23 @@ def main() -> None:
     subsets["train"], subsample_info = subsample_majority_class(
         subsets["train"], cfg["training"], seed
     )
-    data_dir = ROOT / folds["data_dir"]
-    datasets = {name: PTBXL500Dataset(frame, data_dir, feature_columns) for name, frame in subsets.items()}
+    feature_cfg = cfg["training"].get("feature_transform", {}) or {}
+    feature_transform = FeatureTransform.fit(
+        subsets["train"],
+        feature_columns,
+        clip=float(feature_cfg.get("clip", 6.0)),
+        add_missing_indicators=bool(feature_cfg.get("add_missing_indicators", True)),
+    )
+    datasets = {
+        name: PTBXL500Dataset(
+            frame,
+            data_dir,
+            feature_columns,
+            feature_transform,
+            waveform_normalization=str(folds.get("waveform_normalization", "per_lead_zscore")),
+        )
+        for name, frame in subsets.items()
+    }
     loaders = {
         "train": make_train_loader(datasets["train"], subsets["train"]["label_id"].to_numpy(), cfg),
         **{
@@ -179,14 +203,39 @@ def main() -> None:
         },
     }
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device if args.device != "auto" else "cpu")
-    model = make_model(args.model or cfg["models"]["primary"], len(feature_columns)).to(device)
+    model_name = args.model or cfg["models"]["primary"]
+    architecture = cfg["models"].get("architecture", {}) or {}
+    model = make_model(model_name, datasets["train"].feature_dim, architecture=architecture).to(device)
     counts = subsets["train"].label_id.value_counts().reindex([0, 1, 2], fill_value=0).to_numpy()
     if np.any(counts == 0):
         raise ValueError(f"Every training fold must contain all three classes; counts={counts.tolist()}")
     training_cfg = cfg["training"]
     class_weight_power = float(training_cfg.get("class_weight_power", 1.0))
     class_weights = normalized_class_weights(counts, class_weight_power)
-    criterion = nn.CrossEntropyLoss(weight=torch.tensor(class_weights, dtype=torch.float32, device=device))
+    loss_name = str(training_cfg.get("classification_loss", "cross_entropy")).lower()
+    label_smoothing = float(training_cfg.get("label_smoothing", 0.0))
+    if not 0.0 <= label_smoothing < 1.0:
+        raise ValueError("training.label_smoothing must be in [0, 1)")
+    class_weight_tensor = torch.tensor(class_weights, dtype=torch.float32, device=device)
+    if loss_name == "cross_entropy":
+        criterion = nn.CrossEntropyLoss(weight=class_weight_tensor, label_smoothing=label_smoothing)
+    elif loss_name == "focal":
+        focal_gamma = float(training_cfg.get("focal_gamma", 1.5))
+        if focal_gamma < 0:
+            raise ValueError("training.focal_gamma must be non-negative")
+
+        def criterion(logits, target):
+            cross_entropy = F.cross_entropy(
+                logits,
+                target,
+                weight=class_weight_tensor,
+                label_smoothing=label_smoothing,
+                reduction="none",
+            )
+            target_probability = torch.softmax(logits, dim=1).gather(1, target.unsqueeze(1)).squeeze(1)
+            return ((1.0 - target_probability).pow(focal_gamma) * cross_entropy).mean()
+    else:
+        raise ValueError("training.classification_loss must be cross_entropy or focal")
     stemi_positive = int(counts[1]); stemi_negative = int(counts.sum() - stemi_positive)
     sampling_strategy = str(training_cfg.get("sampling_strategy", "none")).lower()
     aux_power = float(training_cfg.get("auxiliary_pos_weight_power", 1.0))
@@ -202,7 +251,7 @@ def main() -> None:
     )
     lbbb_criterion = None
     lbbb_pos_weight = None
-    if lbbb_feature_index is not None and args.model != "seresnet" and (args.model or cfg["models"]["primary"]) == "morphology_fusion":
+    if lbbb_feature_index is not None and model_name == "morphology_fusion":
         lbbb_values = pd.to_numeric(subsets["train"]["lbbb"], errors="coerce").fillna(0).clip(0, 1).to_numpy(dtype=np.float32)
         lbbb_positive = int(lbbb_values.sum())
         lbbb_negative = int(len(lbbb_values) - lbbb_positive)
@@ -212,6 +261,16 @@ def main() -> None:
                 pos_weight=torch.tensor(lbbb_pos_weight, dtype=torch.float32, device=device)
             )
     optimizer = torch.optim.AdamW(model.parameters(), lr=cfg["training"]["learning_rate"], weight_decay=cfg["training"]["weight_decay"])
+    scheduler_cfg = training_cfg.get("lr_scheduler", {}) or {}
+    scheduler = None
+    if bool(scheduler_cfg.get("enabled", False)):
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=float(scheduler_cfg.get("factor", 0.5)),
+            patience=int(scheduler_cfg.get("patience", 3)),
+            min_lr=float(scheduler_cfg.get("min_lr", 1e-5)),
+        )
     best, best_state, stale = -np.inf, None, 0
     history=[]
     fit_start = time.perf_counter()
@@ -239,12 +298,19 @@ def main() -> None:
         sync_device(device)
         val_seconds = time.perf_counter() - val_start
         epoch_seconds = time.perf_counter() - epoch_start
-        metrics.update(epoch_seconds=epoch_seconds, train_seconds=train_seconds, val_seconds=val_seconds)
+        metrics.update(
+            epoch_seconds=epoch_seconds,
+            train_seconds=train_seconds,
+            val_seconds=val_seconds,
+            learning_rate=float(optimizer.param_groups[0]["lr"]),
+        )
         history.append(metrics)
         score = metrics["macro_auprc"]
         print(f"epoch={epoch} loss={metrics['loss']:.4f} val_macro_auprc={score:.4f} epoch_seconds={epoch_seconds:.1f}")
         if score > best: best, stale, best_state = score, 0, {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
         else: stale += 1
+        if scheduler is not None:
+            scheduler.step(score)
         if stale >= cfg["training"]["patience"]: break
     sync_device(device)
     fit_wall_clock_seconds = time.perf_counter() - fit_start
@@ -254,14 +320,24 @@ def main() -> None:
     if bool(cfg.get("metrics", {}).get("calibrate_stemi_threshold", True)):
         threshold_start = time.perf_counter()
         yv, pv = predict(model, loaders["val"], device)
-        threshold, threshold_score = calibrate_stemi_threshold(yv, pv)
+        threshold_cfg = cfg.get("metrics", {}).get("stemi_threshold", {}) or {}
+        threshold, threshold_summary, threshold_candidates = calibrate_stemi_threshold(
+            yv,
+            pv,
+            minimum_stemi_recall=threshold_cfg.get("minimum_stemi_recall"),
+        )
+        threshold_score = threshold_summary["macro_f1"]
         sync_device(device)
         threshold_calibration_seconds = time.perf_counter() - threshold_start
     else:
-        threshold_score = None
+        threshold_score, threshold_summary, threshold_candidates = None, None, None
     out = ROOT / args.out_dir; out.mkdir(parents=True, exist_ok=True)
+    if threshold_candidates is not None:
+        threshold_candidates.to_csv(out / "val_stemi_threshold_candidates.csv", index=False)
     evaluation_seconds_by_split = {}
-    for split, loader in loaders.items():
+    splits_to_evaluate = ("train", "val") if args.skip_test else ("train", "val", "test")
+    for split in splits_to_evaluate:
+        loader = loaders[split]
         if split == "train":
             # Re-evaluate train deterministically; the training sampler is not
             # used for reporting and should not change the reported support.
@@ -271,11 +347,26 @@ def main() -> None:
         sync_device(device)
         results[split] = write_split_artifacts(out, split, y, prob, subsets[split], threshold)
         evaluation_seconds_by_split[split] = time.perf_counter() - eval_start
-    torch.save({"state_dict": model.state_dict(), "feature_columns": feature_columns, "config": cfg}, out / "best_model.pt")
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "feature_columns": feature_columns,
+            "feature_transform": feature_transform.to_dict(),
+            "config": cfg,
+        },
+        out / "best_model.pt",
+    )
     epoch_times = [float(row["epoch_seconds"]) for row in history]
     total_wall_clock_seconds = time.perf_counter() - run_start
     training_summary = {
         "train_class_counts": {str(i): int(counts[i]) for i in range(3)},
+        "feature_profile": feature_profile,
+        "feature_columns": feature_columns,
+        "waveform_normalization": str(folds.get("waveform_normalization", "per_lead_zscore")),
+        "architecture": architecture,
+        "classification_loss": loss_name,
+        "label_smoothing": label_smoothing,
+        "focal_gamma": float(training_cfg.get("focal_gamma", 1.5)) if loss_name == "focal" else None,
         "majority_subsample": subsample_info,
         "class_weights": {str(i): float(class_weights[i]) for i in range(3)},
         "sampling_strategy": sampling_strategy,
@@ -286,8 +377,16 @@ def main() -> None:
         "auxiliary_pos_weight_power": aux_power,
         "lbbb_auxiliary_weight": float(training_cfg.get("lbbb_auxiliary_weight", 0.0)),
         "lbbb_auxiliary_pos_weight": lbbb_pos_weight,
+        "feature_transform": feature_transform.to_dict(),
+        "lr_scheduler": {
+            "enabled": scheduler is not None,
+            "factor": scheduler_cfg.get("factor") if scheduler is not None else None,
+            "patience": scheduler_cfg.get("patience") if scheduler is not None else None,
+            "min_lr": scheduler_cfg.get("min_lr") if scheduler is not None else None,
+        },
         "stemi_threshold": threshold,
         "validation_macro_f1_at_threshold": threshold_score,
+        "threshold_calibration": threshold_summary,
         "timing": {
             "run_started_at_utc": run_started_at_utc,
             "fit_started_at_utc": fit_started_at_utc,

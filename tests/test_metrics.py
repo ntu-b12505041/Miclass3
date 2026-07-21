@@ -1,6 +1,6 @@
 import numpy as np
 
-from miclass3.metrics import classification_tables, predict_labels
+from miclass3.metrics import calibrate_stemi_threshold, classification_tables, predict_labels
 
 
 def test_classification_tables_include_common_metrics_and_all_classes():
@@ -21,3 +21,17 @@ def test_stemi_threshold_keeps_three_class_decision_rule():
         [.05, .20, .75],
     ])
     assert predict_labels(probabilities, stemi_threshold=0.35).tolist() == [1, 2, 2]
+
+
+def test_threshold_calibration_enforces_validation_recall_floor_when_feasible():
+    truth = np.array([1, 1, 0, 2])
+    probabilities = np.array([
+        [.10, .80, .10], [.20, .55, .25], [.70, .20, .10], [.10, .20, .70],
+    ])
+    threshold, summary, candidates = calibrate_stemi_threshold(
+        truth, probabilities, minimum_stemi_recall=1.0
+    )
+    assert threshold <= 0.55
+    assert summary["constraint_satisfied"] is True
+    assert summary["stemi_recall"] == 1.0
+    assert candidates["meets_minimum_stemi_recall"].any()

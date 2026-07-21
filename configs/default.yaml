@@ -4,6 +4,9 @@ data:
   data_dir: data/ptbxl
   sampling_rate: 500
   lead_mode: all12
+  # Baseline preserves the repository's original per-lead z-score path.
+  # Tuning compares a global-scale alternative that retains lead amplitudes.
+  waveform_normalization: per_lead_zscore
   train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
   val_folds: [9]
   test_folds: [10]
@@ -14,6 +17,10 @@ models:
   # Run one primary model; these are the only recommended candidates.
   primary: morphology_fusion
   candidates: [morphology_fusion, inceptiontime, seresnet]
+  architecture:
+    width: 64
+    block_dropout: 0.10
+    fusion_dropout: 0.25
 training:
   batch_size: 32
   epochs: 40
@@ -22,6 +29,12 @@ training:
   patience: 8
   num_workers: 0
   auxiliary_weight: 0.25
+  # `extended` adds non-target-leaking morphology, timing, age/sex and
+  # lead-specific ECG features. It is compared in configs/tuning.yaml.
+  feature_profile: core
+  classification_loss: cross_entropy
+  label_smoothing: 0.0
+  focal_gamma: 1.5
   # Extra hierarchical task: MI (NSTEMI/STEMI proxy) vs non-MI.  It helps
   # separate the two classes that are currently most often confused.
   mi_auxiliary_weight: 0.15
@@ -46,7 +59,24 @@ training:
   # enabled; this keeps it from being dominated by negatives without creating
   # an excessively high positive gradient.
   auxiliary_pos_weight_power: 0.5
+  # Fit robust continuous-feature scaling on folds 1-8 only. Binary evidence
+  # stays 0/1 and missingness is made explicit for the fusion encoder.
+  feature_transform:
+    clip: 6.0
+    add_missing_indicators: true
+  # Reduce the learning rate only when validation macro-AUPRC has stopped
+  # improving. Early stopping uses the same validation-only metric.
+  lr_scheduler:
+    enabled: true
+    factor: 0.5
+    patience: 3
+    min_lr: 0.00001
 metrics:
   selection_metric: val_macro_auprc
   calibrate_stemi_threshold: true
+  # Leave this null for the macro-F1 optimum. Set a validation-only recall
+  # floor (for example 0.75) in a comparison run when STEMI sensitivity is the
+  # operational priority; test labels must never choose this value.
+  stemi_threshold:
+    minimum_stemi_recall: null
   report: [macro_auroc, macro_auprc, macro_f1, balanced_accuracy, stemi_recall]

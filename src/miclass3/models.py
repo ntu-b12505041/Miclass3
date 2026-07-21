@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Mapping
+
 import torch
 from torch import nn
 
@@ -29,12 +31,12 @@ class ResidualSEBlock(nn.Module):
 
 
 class SEResNet(nn.Module):
-    def __init__(self, in_channels: int = 12, classes: int = 3, width: int = 64):
+    def __init__(self, in_channels: int = 12, classes: int = 3, width: int = 64, dropout: float = 0.1):
         super().__init__()
         self.stem = nn.Sequential(nn.Conv1d(in_channels, width, 15, padding=7, bias=False), nn.BatchNorm1d(width), nn.SiLU())
         self.encoder = nn.Sequential(
-            ResidualSEBlock(width, width), ResidualSEBlock(width, width * 2, 2), ResidualSEBlock(width * 2, width * 2),
-            ResidualSEBlock(width * 2, width * 4, 2), ResidualSEBlock(width * 4, width * 4), ResidualSEBlock(width * 4, width * 8, 2),
+            ResidualSEBlock(width, width, dropout=dropout), ResidualSEBlock(width, width * 2, 2, dropout=dropout), ResidualSEBlock(width * 2, width * 2, dropout=dropout),
+            ResidualSEBlock(width * 2, width * 4, 2, dropout=dropout), ResidualSEBlock(width * 4, width * 4, dropout=dropout), ResidualSEBlock(width * 4, width * 8, 2, dropout=dropout),
         )
         self.pool = nn.AdaptiveAvgPool1d(1)
         self.embedding_dim = width * 8
@@ -64,10 +66,10 @@ class InceptionBlock(nn.Module):
 
 
 class InceptionTime(nn.Module):
-    def __init__(self, in_channels: int = 12, classes: int = 3, channels: int = 128):
+    def __init__(self, in_channels: int = 12, classes: int = 3, channels: int = 128, dropout: float = 0.2):
         super().__init__()
         self.blocks = nn.Sequential(InceptionBlock(in_channels, channels), InceptionBlock(channels, channels), InceptionBlock(channels, channels), InceptionBlock(channels, channels), InceptionBlock(channels, channels), InceptionBlock(channels, channels))
-        self.head = nn.Sequential(nn.AdaptiveAvgPool1d(1), nn.Flatten(), nn.Dropout(0.2), nn.Linear(channels, classes))
+        self.head = nn.Sequential(nn.AdaptiveAvgPool1d(1), nn.Flatten(), nn.Dropout(dropout), nn.Linear(channels, classes))
 
     def forward(self, x, features=None):
         return {"class_logits": self.head(self.blocks(x))}
@@ -80,9 +82,17 @@ class MorphologyFusion(nn.Module):
     its optional auxiliary loss encourages the raw ECG encoder to represent
     conduction abnormality, instead of merely copying the LBBB input feature.
     """
-    def __init__(self, in_channels: int = 12, feature_dim: int = 0, classes: int = 3):
+    def __init__(
+        self,
+        in_channels: int = 12,
+        feature_dim: int = 0,
+        classes: int = 3,
+        width: int = 64,
+        block_dropout: float = 0.1,
+        fusion_dropout: float = 0.25,
+    ):
         super().__init__()
-        self.ecg = SEResNet(in_channels, classes=classes)
+        self.ecg = SEResNet(in_channels, classes=classes, width=width, dropout=block_dropout)
         self.feature_dim = feature_dim
         # Project the two modalities to comparable scales before fusion.  The
         # previous version concatenated a 512-d raw embedding with a 64-d
@@ -115,7 +125,7 @@ class MorphologyFusion(nn.Module):
             nn.Linear(total, 256),
             nn.LayerNorm(256),
             nn.SiLU(),
-            nn.Dropout(0.25),
+            nn.Dropout(fusion_dropout),
             nn.Linear(256, classes),
         )
         # The two binary heads reflect the proxy-label hierarchy.  They are
@@ -145,8 +155,31 @@ class MorphologyFusion(nn.Module):
         }
 
 
-def make_model(name: str, feature_dim: int = 0, in_channels: int = 12) -> nn.Module:
-    if name == "seresnet": return SEResNet(in_channels)
-    if name == "inceptiontime": return InceptionTime(in_channels)
-    if name == "morphology_fusion": return MorphologyFusion(in_channels, feature_dim)
+def make_model(
+    name: str,
+    feature_dim: int = 0,
+    in_channels: int = 12,
+    architecture: Mapping[str, object] | None = None,
+) -> nn.Module:
+    options = architecture or {}
+    if name == "seresnet":
+        return SEResNet(
+            in_channels,
+            width=int(options.get("width", 64)),
+            dropout=float(options.get("block_dropout", 0.1)),
+        )
+    if name == "inceptiontime":
+        return InceptionTime(
+            in_channels,
+            channels=int(options.get("inception_channels", 128)),
+            dropout=float(options.get("fusion_dropout", 0.2)),
+        )
+    if name == "morphology_fusion":
+        return MorphologyFusion(
+            in_channels,
+            feature_dim,
+            width=int(options.get("width", 64)),
+            block_dropout=float(options.get("block_dropout", 0.1)),
+            fusion_dropout=float(options.get("fusion_dropout", 0.25)),
+        )
     raise ValueError(f"Unknown model: {name}")

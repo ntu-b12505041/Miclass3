@@ -81,6 +81,25 @@ For a CPU pipeline check only:
 python scripts/train.py --model seresnet --device cpu --max-records 300
 ```
 
+## All-metric tuning
+
+To target a minimum of `0.85` for accuracy, balanced accuracy, macro-AUROC,
+macro-AUPRC, macro-F1, and STEMI-proxy recall, run the predefined
+validation-only candidates:
+
+```bash
+python scripts/tune.py --device cuda --out-dir artifacts/tuning_085 --finalize
+```
+
+Each candidate is trained on folds 1-8 and evaluated on fold 9 with
+`--skip-test`. `validation_leaderboard.csv` ranks candidates by their weakest
+required metric, so a high AUPRC cannot hide a weak balanced accuracy or STEMI
+recall. Fold 10 is evaluated only once after a candidate reaches every
+validation target. Inspect `selection.json`; `test_passes_target: true` is the
+required evidence that the final selected run meets the target on the held-out
+test fold. Candidate settings and the 0.85 threshold live in
+`configs/tuning.yaml`.
+
 For VS Code GPU setup, see [the GPU training guide](docs/vscode_gpu_training.md).
 
 For AI coding agents, start with [the AI agent runbook](docs/ai_agent_runbook.md). It gives the exact order for data checks, raw ECG morphology extraction, label manifest creation, GPU smoke testing, full training, and results reporting.
@@ -92,15 +111,21 @@ The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every
 - `train|val|test_confusion_matrix.csv` and `.png`: labelled numerical and publication-ready confusion matrices.
 - `train|val|test_predictions.csv`: every prediction, the three probabilities, and ECG/patient/fold identifiers for audit.
 - `best_model.pt` and `metrics.json`: selected model state, epoch history, imbalance settings, calibrated threshold, and training timing.
+- `val_stemi_threshold_candidates.csv`: every validation-only STEMI threshold candidate, including macro-F1, balanced accuracy, and STEMI-proxy recall.
 
 The default configuration first takes a deterministic training-only subsample
 of `non_mi`, capped at 2:1 relative to `nstemi_proxy`, to reduce the observed
 non-MI/NSTEMI-proxy confusion. Validation and test records are untouched. It
 then uses moderate square-root class-aware sampling, softened
 inverse-frequency loss weights, and weighted MI/STEMI auxiliary losses. A
-STEMI decision threshold is calibrated on fold 9 by macro-F1 and frozen before
-fold 10 evaluation; the before/after training counts and calibration values
-are recorded in `metrics.json`.
+Morphology features are robustly scaled using folds 1-8 only (with explicit
+missingness flags) before fusion. The learning rate is reduced only after
+validation macro-AUPRC plateaus. The STEMI decision threshold is calibrated on
+fold 9 by macro-F1 and frozen before fold 10 evaluation; the before/after
+training counts and calibration values are recorded in `metrics.json`. If
+STEMI sensitivity is the operational priority, set
+`metrics.stemi_threshold.minimum_stemi_recall` for a separate comparison run;
+do not select that floor from fold 10.
 
 The morphology-fusion model also has light hierarchy tasks for MI-vs-non-MI
 and STEMI-vs-non-STEMI, plus the LBBB auxiliary task. These strengthen the

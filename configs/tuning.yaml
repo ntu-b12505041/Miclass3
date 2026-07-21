@@ -1,0 +1,81 @@
+# Every candidate is trained and selected on folds 1-9 only. Fold 10 is
+# evaluated once, only after a candidate reaches the validation acceptance bar.
+acceptance:
+  target: 0.85
+  required_metrics:
+    - accuracy
+    - balanced_accuracy
+    - macro_auroc
+    - macro_auprc
+    - macro_f1
+    - stemi_recall
+
+# These are focused regularization/imbalance settings around morphology_fusion,
+# not an uncontrolled architecture sweep. Run all candidates on the same seed,
+# then repeat the winner across additional seeds before making a research claim.
+candidates:
+  - name: baseline
+    overrides: {}
+  - name: lower_lr_longer_patience
+    overrides:
+      training:
+        learning_rate: 0.00015
+        epochs: 60
+        patience: 12
+  - name: moderate_lr_less_decay
+    overrides:
+      training:
+        learning_rate: 0.0002
+        weight_decay: 0.00003
+        epochs: 60
+        patience: 12
+  - name: more_stemi_sampling
+    overrides:
+      training:
+        sampling_power: 0.65
+        class_weight_power: 0.4
+        auxiliary_pos_weight_power: 0.4
+  - name: less_aggressive_non_mi_subsample
+    overrides:
+      training:
+        majority_subsample:
+          max_ratio: 2.5
+        sampling_power: 0.4
+        class_weight_power: 0.4
+  - name: stronger_hierarchy_auxiliary
+    overrides:
+      training:
+        auxiliary_weight: 0.35
+        mi_auxiliary_weight: 0.25
+        lbbb_auxiliary_weight: 0.08
+  - name: extended_ecg_morphology
+    overrides:
+      training:
+        feature_profile: extended
+        learning_rate: 0.0002
+        epochs: 60
+        patience: 12
+  - name: extended_morphology_global_lead_scale
+    overrides:
+      data:
+        waveform_normalization: lead_centered_global_scale
+      training:
+        feature_profile: extended
+        learning_rate: 0.00015
+        epochs: 60
+        patience: 12
+  - name: wider_extended_focal
+    overrides:
+      models:
+        architecture:
+          width: 96
+          block_dropout: 0.08
+          fusion_dropout: 0.20
+      training:
+        feature_profile: extended
+        classification_loss: focal
+        focal_gamma: 1.5
+        class_weight_power: 0.4
+        learning_rate: 0.00015
+        epochs: 60
+        patience: 12

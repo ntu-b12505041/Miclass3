@@ -89,6 +89,63 @@ def classification_tables(
     return overall, pd.DataFrame(rows), pd.DataFrame(matrix, index=CLASS_NAMES, columns=CLASS_NAMES)
 
 
+def calibrate_stemi_threshold(
+    y_true: np.ndarray,
+    probabilities: np.ndarray,
+    minimum_stemi_recall: float | None = None,
+) -> tuple[float, dict[str, float | bool | int | None], pd.DataFrame]:
+    """Calibrate a frozen STEMI threshold using validation data only.
+
+    The search uses each observed STEMI probability rather than an arbitrary
+    0.01 grid. This finds the exact macro-F1 optimum available to the current
+    validation predictions. A recall floor is optional: when requested, it is
+    a hard constraint whenever any threshold can satisfy it. Tie-breaking then
+    favours balanced accuracy and STEMI recall.
+    """
+    y_true = np.asarray(y_true, dtype=int)
+    probabilities = np.asarray(probabilities, dtype=float)
+    if probabilities.ndim != 2 or probabilities.shape[1] != 3:
+        raise ValueError("probabilities must have shape (n_samples, 3)")
+    if len(y_true) != len(probabilities):
+        raise ValueError("y_true and probabilities must have the same length")
+    if minimum_stemi_recall is not None and not 0.0 <= float(minimum_stemi_recall) <= 1.0:
+        raise ValueError("minimum_stemi_recall must be in [0, 1]")
+
+    thresholds = np.unique(np.concatenate(([0.0], probabilities[:, 1], [1.0])))
+    rows: list[dict[str, float | bool]] = []
+    for threshold in thresholds:
+        values = multiclass_metrics(y_true, probabilities, float(threshold))
+        recall = float(values["stemi_recall"])
+        rows.append(
+            {
+                "threshold": float(threshold),
+                "macro_f1": float(values["macro_f1"]),
+                "balanced_accuracy": float(values["balanced_accuracy"]),
+                "stemi_recall": recall,
+                "meets_minimum_stemi_recall": minimum_stemi_recall is None or recall >= float(minimum_stemi_recall),
+            }
+        )
+    candidates = pd.DataFrame(rows)
+    feasible = candidates[candidates["meets_minimum_stemi_recall"]]
+    constraint_satisfied = not feasible.empty
+    pool = feasible if constraint_satisfied else candidates
+    chosen = pool.sort_values(
+        ["macro_f1", "balanced_accuracy", "stemi_recall", "threshold"],
+        ascending=[False, False, False, True],
+        kind="stable",
+    ).iloc[0]
+    summary: dict[str, float | bool | int | None] = {
+        "objective": "macro_f1",
+        "minimum_stemi_recall": None if minimum_stemi_recall is None else float(minimum_stemi_recall),
+        "constraint_satisfied": bool(constraint_satisfied),
+        "candidate_count": int(len(candidates)),
+        "macro_f1": float(chosen["macro_f1"]),
+        "balanced_accuracy": float(chosen["balanced_accuracy"]),
+        "stemi_recall": float(chosen["stemi_recall"]),
+    }
+    return float(chosen["threshold"]), summary, candidates
+
+
 def write_split_artifacts(
     output_dir: str | Path,
     split: str,

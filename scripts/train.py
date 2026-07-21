@@ -82,6 +82,54 @@ def make_train_loader(dataset, labels: np.ndarray, cfg: dict):
     )
 
 
+def subsample_majority_class(
+    frame: pd.DataFrame, training_cfg: dict, seed: int
+) -> tuple[pd.DataFrame, dict]:
+    """Cap the large non-MI class for the training split only.
+
+    The cap is expressed relative to ``reference_label`` (NSTEMI-proxy by
+    default).  Validation and test rows are never touched, and the sample is
+    deterministic for reproducible runs.  This reduces repeated easy
+    non-MI examples while preserving the existing square-root sampler for the
+    much smaller STEMI-proxy class.
+    """
+    spec = training_cfg.get("majority_subsample", {}) or {}
+    enabled = bool(spec.get("enabled", False))
+    majority_label = int(spec.get("majority_label", 0))
+    reference_label = int(spec.get("reference_label", 2))
+    ratio = float(spec.get("max_ratio", 2.0))
+    before = frame["label_id"].value_counts().reindex([0, 1, 2], fill_value=0).astype(int)
+    info = {
+        "enabled": enabled,
+        "majority_label": majority_label,
+        "reference_label": reference_label,
+        "max_ratio": ratio,
+        "before_counts": {str(i): int(before[i]) for i in range(3)},
+    }
+    if not enabled:
+        info["after_counts"] = info["before_counts"].copy()
+        info["removed_count"] = 0
+        return frame, info
+    if ratio <= 0:
+        raise ValueError("training.majority_subsample.max_ratio must be positive")
+    majority = frame[frame["label_id"] == majority_label]
+    reference_count = int((frame["label_id"] == reference_label).sum())
+    cap = int(np.ceil(reference_count * ratio))
+    if reference_count == 0 or len(majority) <= cap:
+        info["cap"] = int(cap)
+        info["after_counts"] = info["before_counts"].copy()
+        info["removed_count"] = 0
+        return frame, info
+    keep_majority = majority.sample(n=max(1, cap), random_state=seed)
+    keep_other = frame[frame["label_id"] != majority_label]
+    sampled = pd.concat([keep_other, keep_majority], axis=0).sample(frac=1.0, random_state=seed)
+    after = sampled["label_id"].value_counts().reindex([0, 1, 2], fill_value=0).astype(int)
+    info["cap"] = int(cap)
+    info["after_counts"] = {str(i): int(after[i]) for i in range(3)}
+    info["removed_count"] = int(len(frame) - len(sampled))
+    return sampled.reset_index(drop=True), info
+
+
 def calibrate_stemi_threshold(y_true: np.ndarray, probabilities: np.ndarray) -> tuple[float, float]:
     """Select a STEMI threshold on validation data by macro-F1."""
     best_threshold, best_score = 0.5, -np.inf
@@ -108,7 +156,14 @@ def main() -> None:
     feature_columns = [c for c in ("max_st_j_mv", "max_st_j60_mv", "max_st_s_ratio", "qrs_duration_ms", "lbbb", "modified_sgarbossa_positive") if c in manifest]
     lbbb_feature_index = feature_columns.index("lbbb") if "lbbb" in feature_columns else None
     folds = cfg["data"]
-    subsets = {"train": manifest[manifest.strat_fold.isin(folds["train_folds"])], "val": manifest[manifest.strat_fold.isin(folds["val_folds"])], "test": manifest[manifest.strat_fold.isin(folds["test_folds"])]}
+    subsets = {
+        "train": manifest[manifest.strat_fold.isin(folds["train_folds"])].copy(),
+        "val": manifest[manifest.strat_fold.isin(folds["val_folds"])].copy(),
+        "test": manifest[manifest.strat_fold.isin(folds["test_folds"])].copy(),
+    }
+    subsets["train"], subsample_info = subsample_majority_class(
+        subsets["train"], cfg["training"], seed
+    )
     data_dir = ROOT / folds["data_dir"]
     datasets = {name: PTBXL500Dataset(frame, data_dir, feature_columns) for name, frame in subsets.items()}
     loaders = {
@@ -139,6 +194,12 @@ def main() -> None:
     aux_criterion = nn.BCEWithLogitsLoss(
         pos_weight=torch.tensor(aux_pos_weight, dtype=torch.float32, device=device)
     )
+    mi_positive = int(counts[1] + counts[2])
+    mi_negative = int(counts[0])
+    mi_pos_weight = (mi_negative / max(mi_positive, 1)) ** aux_power
+    mi_criterion = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(mi_pos_weight, dtype=torch.float32, device=device)
+    )
     lbbb_criterion = None
     lbbb_pos_weight = None
     if lbbb_feature_index is not None and args.model != "seresnet" and (args.model or cfg["models"]["primary"]) == "morphology_fusion":
@@ -164,6 +225,9 @@ def main() -> None:
             if "stemi_logits" in outputs:
                 target = (y.to(device) == 1).float()
                 loss = loss + training_cfg["auxiliary_weight"] * aux_criterion(outputs["stemi_logits"], target)
+            if "mi_logits" in outputs:
+                mi_target = (y.to(device) != 0).float()
+                loss = loss + training_cfg.get("mi_auxiliary_weight", 0.15) * mi_criterion(outputs["mi_logits"], mi_target)
             if lbbb_criterion is not None and "lbbb_logits" in outputs:
                 lbbb_target = f[:, lbbb_feature_index].to(device).clamp(0, 1)
                 loss = loss + training_cfg.get("lbbb_auxiliary_weight", 0.0) * lbbb_criterion(outputs["lbbb_logits"], lbbb_target)
@@ -212,10 +276,13 @@ def main() -> None:
     total_wall_clock_seconds = time.perf_counter() - run_start
     training_summary = {
         "train_class_counts": {str(i): int(counts[i]) for i in range(3)},
+        "majority_subsample": subsample_info,
         "class_weights": {str(i): float(class_weights[i]) for i in range(3)},
         "sampling_strategy": sampling_strategy,
         "sampling_power": float(training_cfg.get("sampling_power", 0.5)),
         "auxiliary_stemi_pos_weight": float(aux_pos_weight),
+        "mi_auxiliary_weight": float(training_cfg.get("mi_auxiliary_weight", 0.15)),
+        "auxiliary_mi_pos_weight": float(mi_pos_weight),
         "auxiliary_pos_weight_power": aux_power,
         "lbbb_auxiliary_weight": float(training_cfg.get("lbbb_auxiliary_weight", 0.0)),
         "lbbb_auxiliary_pos_weight": lbbb_pos_weight,

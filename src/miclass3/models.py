@@ -84,22 +84,63 @@ class MorphologyFusion(nn.Module):
         super().__init__()
         self.ecg = SEResNet(in_channels, classes=classes)
         self.feature_dim = feature_dim
-        self.feature_encoder = nn.Sequential(nn.Linear(feature_dim, 64), nn.LayerNorm(64), nn.SiLU(), nn.Dropout(0.15)) if feature_dim else None
-        total = self.ecg.embedding_dim + (64 if feature_dim else 0)
-        self.classifier = nn.Sequential(nn.Linear(total, 256), nn.SiLU(), nn.Dropout(0.25), nn.Linear(256, classes))
+        # Project the two modalities to comparable scales before fusion.  The
+        # previous version concatenated a 512-d raw embedding with a 64-d
+        # morphology embedding, which allowed the waveform branch to dominate
+        # the small but label-defining morphology signal.  A learned gate lets
+        # the raw representation decide how much morphology evidence to use.
+        self.raw_projection = nn.Sequential(
+            nn.Linear(self.ecg.embedding_dim, 256),
+            nn.LayerNorm(256),
+            nn.SiLU(),
+            nn.Dropout(0.10),
+        )
+        self.feature_encoder = (
+            nn.Sequential(
+                nn.Linear(feature_dim, 128),
+                nn.LayerNorm(128),
+                nn.SiLU(),
+                nn.Dropout(0.10),
+            )
+            if feature_dim
+            else None
+        )
+        self.feature_gate = (
+            nn.Sequential(nn.Linear(self.ecg.embedding_dim + 128, 128), nn.Sigmoid())
+            if feature_dim
+            else None
+        )
+        total = 256 + (128 if feature_dim else 0)
+        self.classifier = nn.Sequential(
+            nn.Linear(total, 256),
+            nn.LayerNorm(256),
+            nn.SiLU(),
+            nn.Dropout(0.25),
+            nn.Linear(256, classes),
+        )
+        # The two binary heads reflect the proxy-label hierarchy.  They are
+        # auxiliary tasks only; class_logits remains the sole three-class
+        # prediction consumed by the evaluation code.
         self.stemi_head = nn.Linear(total, 1)
+        self.mi_head = nn.Linear(total, 1)
         self.lbbb_head = nn.Linear(self.ecg.embedding_dim, 1)
 
     def forward(self, x, features=None):
         raw_z = self.ecg.encode(x)
-        z = raw_z
+        raw_repr = self.raw_projection(raw_z)
+        z = raw_repr
         if self.feature_encoder is not None:
             if features is None:
                 features = torch.zeros((x.shape[0], self.feature_dim), device=x.device)
-            z = torch.cat([z, self.feature_encoder(features)], dim=1)
+            morphology_z = self.feature_encoder(features)
+            # Keep a non-zero morphology path even when the gate is initially
+            # conservative; 0.5..1.5 is a stable range for early training.
+            gate = 0.5 + self.feature_gate(torch.cat([raw_z, morphology_z], dim=1))
+            z = torch.cat([raw_repr, morphology_z * gate], dim=1)
         return {
             "class_logits": self.classifier(z),
             "stemi_logits": self.stemi_head(z).squeeze(1),
+            "mi_logits": self.mi_head(z).squeeze(1),
             "lbbb_logits": self.lbbb_head(raw_z).squeeze(1),
         }
 

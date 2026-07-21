@@ -96,21 +96,26 @@ Train the primary model:
 python scripts/train.py --model morphology_fusion --device cuda --out-dir artifacts/morphology_fusion
 ```
 
-The default training configuration includes three first-stage imbalance
+The default training configuration first takes a deterministic training-only
+subsample of `non_mi`, capping it at 2:1 relative to `nstemi_proxy`.  This is
+intended to reduce the current non-MI/NSTEMI-proxy confusion without changing
+validation or test prevalence.  It then applies three moderate imbalance
 controls: square-root class-aware sampling, square-root inverse-frequency
-cross-entropy weights, and a softened positive weight for the STEMI auxiliary
-binary head.  These are intentionally moderate because combining full
-oversampling with full inverse-frequency loss would over-correct the 744
-STEMI-proxy records.  The validation fold is used to calibrate a STEMI
-probability threshold by macro-F1; that threshold is then frozen for the test
-artifacts.  The selected values and training-fold counts are saved in
+cross-entropy weights, and softened positive weights for the STEMI and MI
+auxiliary binary heads.  Combining full oversampling with full
+inverse-frequency loss would over-correct the small STEMI-proxy class.  The
+validation fold is used to calibrate a STEMI probability threshold by macro-F1;
+that threshold is then frozen for the test artifacts.  The selected values,
+before/after subsample counts, and training-fold counts are saved in
 `artifacts/<run>/metrics.json`.
 
 In `morphology_fusion`, the optional LBBB auxiliary head predicts the
-extractor's LBBB flag from the raw ECG embedding.  It is weighted lightly and
-is only active when the `lbbb` morphology feature is present.  This encourages
-the waveform encoder to represent conduction abnormality; it is not a new
-clinical label and must be described as a morphology-derived auxiliary target.
+extractor's LBBB flag from the raw ECG embedding.  The model also has two
+lightweight hierarchy heads: MI vs non-MI and STEMI-proxy vs non-STEMI-proxy.
+They regularize the encoder around the two clinically meaningful boundaries,
+while `class_logits` remains the only three-class output used for metrics.
+These are morphology/label-derived auxiliary targets, not new clinical
+endpoints.
 
 Optional comparison models:
 

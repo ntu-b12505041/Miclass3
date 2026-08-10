@@ -1,0 +1,39 @@
+seed: 42
+
+data:
+  source: ptb-xl-1.0.3
+  data_dir: data/ptbxl
+  waveform_normalization: per_lead_zscore
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+
+architecture:
+  width: 64
+  block_dropout: 0.10
+
+training:
+  batch_size: 32
+  epochs: 40
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  patience: 8
+  num_workers: 0
+  class_weight_power: 0.5
+  grad_clip_norm: 1.0
+
+cascade:
+  # Stage 1: all records, target = MI (STEMI-proxy or NSTEMI-proxy) vs non-MI.
+  stage1_name: mi_vs_non_mi
+  stage1_minimum_recall: null
+
+  # Stage 2: only true MI records during training, target = STEMI-proxy vs NSTEMI-proxy.
+  stage2_name: stemi_vs_nstemi
+  stage2_minimum_recall: null
+
+  # literal_hard_gate reproduces the requested sequential decision flow.
+  # soft_probability also gets exported for analysis.
+  routing_mode: literal_hard_gate
+
+output:
+  out_dir: artifacts/cascade

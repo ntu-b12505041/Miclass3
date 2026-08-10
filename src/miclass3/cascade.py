@@ -51,19 +51,30 @@ def compose_hard_cascade(
     predictions[routed & (p_stemi_mi >= float(stemi_threshold))] = 1
     predictions[routed & (p_stemi_mi < float(stemi_threshold))] = 2
 
-    # Make argmax reproduce the explicit routing decision while preserving the
-    # soft probabilities as much as possible within the selected branch.
+    # Make argmax reproduce the literal routing decision while preserving the
+    # conditional probabilities within the selected branch.
     hard_scores = scores.copy()
     stop = ~routed
-    hard_scores[stop, 0] = np.maximum(hard_scores[stop, 0], 0.500001)
-    hard_scores[stop, 1:] *= (1.0 - hard_scores[stop, 0]) / np.maximum(hard_scores[stop, 1:].sum(axis=1, keepdims=True), 1e-12)
+    if np.any(stop):
+        hard_scores[stop, 0] = np.maximum(hard_scores[stop, 0], 0.500001)
+        remaining = (1.0 - hard_scores[stop, 0])[:, None]
+        branch_sum = hard_scores[stop, 1:].sum(axis=1, keepdims=True)
+        fallback = np.full((int(stop.sum()), 2), 0.5, dtype=float)
+        branch_mix = np.divide(
+            hard_scores[stop, 1:],
+            branch_sum,
+            out=fallback,
+            where=branch_sum > 1e-12,
+        )
+        hard_scores[stop, 1:] = branch_mix * remaining
+
     for index in np.where(routed)[0]:
         hard_scores[index, 0] = 0.0
         if predictions[index] == 1:
-            hard_scores[index, 1] = max(hard_scores[index, 1], 0.500001)
+            hard_scores[index, 1] = max(float(hard_scores[index, 1]), 0.500001)
             hard_scores[index, 2] = 1.0 - hard_scores[index, 1]
         else:
-            hard_scores[index, 2] = max(hard_scores[index, 2], 0.500001)
+            hard_scores[index, 2] = max(float(hard_scores[index, 2]), 0.500001)
             hard_scores[index, 1] = 1.0 - hard_scores[index, 2]
     hard_scores /= np.maximum(hard_scores.sum(axis=1, keepdims=True), 1e-12)
     return hard_scores, predictions

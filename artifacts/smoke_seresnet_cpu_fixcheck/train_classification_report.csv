@@ -1,0 +1,4 @@
+class,precision,recall_sensitivity,f1,specificity,support
+non_mi,0.45714285714285713,1.0,0.6274509803921569,0.0,32
+stemi_proxy,0.0,0.0,0.0,1.0,6
+nstemi_proxy,0.0,0.0,0.0,1.0,32

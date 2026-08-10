@@ -1,0 +1,4 @@
+actual\predicted,non_mi,stemi_proxy,nstemi_proxy
+non_mi,0,0,10
+stemi_proxy,0,3,0
+nstemi_proxy,0,0,10

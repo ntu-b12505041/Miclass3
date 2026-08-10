@@ -1,0 +1,12 @@
+ecg_id,patient_id,strat_fold,label_reason,actual_id,actual_label,predicted_id,predicted_label,prob_non_mi,prob_stemi_proxy,prob_nstemi_proxy
+8111,9221.0,9,no_mi_scp,0,non_mi,0,non_mi,0.3596681,0.3412704,0.2990616
+13312,21594.0,9,no_mi_scp,0,non_mi,0,non_mi,0.3639141,0.33695087,0.29913503
+16104,11512.0,9,no_mi_scp,0,non_mi,0,non_mi,0.36572,0.34082612,0.29345393
+7045,19599.0,9,no_mi_scp,0,non_mi,0,non_mi,0.35877073,0.33842942,0.30279985
+189,13112.0,9,lbbb_modified_sgarbossa,1,stemi_proxy,0,non_mi,0.3553916,0.33671835,0.30789003
+234,17115.0,9,lbbb_modified_sgarbossa,1,stemi_proxy,0,non_mi,0.35661876,0.34430894,0.29907233
+287,6437.0,9,lbbb_modified_sgarbossa,1,stemi_proxy,0,non_mi,0.35329396,0.34233826,0.30436778
+19632,17365.0,9,mi_scp_without_stemi_pattern,2,nstemi_proxy,0,non_mi,0.35667092,0.3352628,0.3080663
+2707,20920.0,9,mi_scp_without_stemi_pattern,2,nstemi_proxy,0,non_mi,0.35744846,0.33832392,0.30422765
+13515,9759.0,9,mi_scp_without_stemi_pattern,2,nstemi_proxy,0,non_mi,0.3539493,0.33567196,0.3103787
+3127,17465.0,9,mi_scp_without_stemi_pattern,2,nstemi_proxy,0,non_mi,0.3550626,0.33576158,0.3091758

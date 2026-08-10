@@ -1,0 +1,26 @@
+{
+  "macro_f1": 0.0,
+  "balanced_accuracy": 0.0,
+  "stemi_recall": 0.0,
+  "confusion_matrix": [
+    [
+      0,
+      10,
+      0
+    ],
+    [
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      10,
+      0
+    ]
+  ],
+  "macro_auroc": NaN,
+  "macro_auprc": 0.41869531440351865,
+  "accuracy": 0.0,
+  "n_records": 20
+}

@@ -1,0 +1,4 @@
+actual\predicted,non_mi,stemi_proxy,nstemi_proxy
+non_mi,6946,72,514
+stemi_proxy,40,544,26
+nstemi_proxy,871,14,2881

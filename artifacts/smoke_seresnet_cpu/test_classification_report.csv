@@ -1,0 +1,4 @@
+class,precision,recall_sensitivity,f1,specificity,support
+non_mi,0.0,0.0,0.0,1.0,10
+stemi_proxy,0.0,0.0,0.0,0.0,0
+nstemi_proxy,0.0,0.0,0.0,1.0,10

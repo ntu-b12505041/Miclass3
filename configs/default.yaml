@@ -28,7 +28,7 @@ training:
   weight_decay: 0.0001
   patience: 8
   num_workers: 0
-  auxiliary_weight: 0.25
+  auxiliary_weight: 0.35
   # `extended` adds non-target-leaking morphology, timing, age/sex and
   # lead-specific ECG features. It is compared in configs/tuning.yaml.
   feature_profile: core
@@ -37,7 +37,7 @@ training:
   focal_gamma: 1.5
   # Extra hierarchical task: MI (NSTEMI/STEMI proxy) vs non-MI.  It helps
   # separate the two classes that are currently most often confused.
-  mi_auxiliary_weight: 0.15
+  mi_auxiliary_weight: 0.25
   lbbb_auxiliary_weight: 0.05
   # Use a deterministic training-only sub-sample of non_mi.  The reference
   # class is nstemi_proxy (label 2), so non_mi is capped at 2:1 relative to
@@ -54,11 +54,11 @@ training:
   sampling_power: 0.5
   # Use softened inverse-frequency weights with the sampler.  Combining full
   # inverse-frequency sampling and full inverse-frequency loss overcorrects.
-  class_weight_power: 0.5
+  class_weight_power: 0.8
   # The auxiliary STEMI head uses a softened positive weight when sampling is
   # enabled; this keeps it from being dominated by negatives without creating
   # an excessively high positive gradient.
-  auxiliary_pos_weight_power: 0.5
+  auxiliary_pos_weight_power: 0.8
   # Fit robust continuous-feature scaling on folds 1-8 only. Binary evidence
   # stays 0/1 and missingness is made explicit for the fusion encoder.
   feature_transform:

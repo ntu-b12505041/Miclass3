@@ -16,21 +16,43 @@ from sklearn.metrics import average_precision_score, balanced_accuracy_score, f1
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from miclass3.cascade import calibrate_binary_threshold, compose_hard_cascade, compose_soft_cascade
+from miclass3.cascade import (
+    calibrate_binary_threshold,
+    calibrate_soft_cascade,
+    compose_calibrated_soft_cascade,
+    compose_hard_cascade,
+    compose_soft_cascade,
+)
 from miclass3.data import FeatureTransform, PTBXL500Dataset
 from miclass3.metrics import write_split_artifacts
 from miclass3.models import MorphologyFusion, SEResNet
 
-# Avoid direct target shortcuts such as modified_sgarbossa_positive. These
-# continuous / structural ECG features still expose clinically relevant
-# morphology without feeding the final proxy-label rule itself to stage 2.
-CASCADE_STAGE2_FEATURES = (
+# These are derived ECG measurements, not target columns.  We intentionally
+# exclude direct proxy-rule outputs such as `standard_stemi` and
+# `modified_sgarbossa_positive` from model inputs.
+CORE_STAGE2_FEATURES = (
     "max_st_j_mv",
     "max_st_j60_mv",
     "max_st_s_ratio",
     "qrs_duration_ms",
     "lbbb",
 )
+LEAD_AWARE_PREFIXES = (
+    "st_j_",
+    "st_j60_",
+    "s_depth_",
+    "qrs_polarity_",
+)
+FORBIDDEN_FEATURES = {
+    "label",
+    "label_id",
+    "label_reason",
+    "label_tier",
+    "standard_stemi",
+    "modified_sgarbossa_positive",
+    "mi_scp_codes",
+    "scp_codes",
+}
 
 
 def normalized_class_weights(counts: np.ndarray, power: float) -> np.ndarray:
@@ -63,8 +85,28 @@ def target_for_stage(labels, stage: int):
     if stage == 1:
         return (labels != 0).long()
     if stage == 2:
+        # Stage-2 dataset contains only MI-proxy records: class 1 is STEMI.
         return (labels == 1).long()
     raise ValueError("stage must be 1 or 2")
+
+
+def select_stage2_features(frame: pd.DataFrame, profile: str) -> list[str]:
+    profile = str(profile).lower()
+    if profile not in {"core", "lead_aware"}:
+        raise ValueError("cascade.stage2_feature_profile must be core or lead_aware")
+
+    selected = [name for name in CORE_STAGE2_FEATURES if name in frame.columns]
+    if profile == "lead_aware":
+        selected.extend(
+            sorted(
+                name
+                for name in frame.columns
+                if name not in FORBIDDEN_FEATURES
+                and any(name.startswith(prefix) for prefix in LEAD_AWARE_PREFIXES)
+            )
+        )
+    # Deterministic de-duplication.
+    return list(dict.fromkeys(selected))
 
 
 def forward_logits(model, x, features, device, stage: int):
@@ -89,7 +131,13 @@ def predict_binary(model, loader, device, stage: int):
     return np.concatenate(targets), np.concatenate(probabilities)
 
 
-def train_stage(stage: int, train_loader, val_loader, device, cfg: dict):
+def initialize_stage2_from_stage1(stage2: MorphologyFusion, stage1: SEResNet) -> None:
+    """Warm-start the stage-2 waveform encoder from the larger MI task."""
+    stage2.ecg.stem.load_state_dict(stage1.stem.state_dict())
+    stage2.ecg.encoder.load_state_dict(stage1.encoder.state_dict())
+
+
+def train_stage(stage: int, train_loader, val_loader, device, cfg: dict, stage1_model=None):
     import torch
     from torch import nn
 
@@ -104,6 +152,8 @@ def train_stage(stage: int, train_loader, val_loader, device, cfg: dict):
             dropout=float(arch.get("block_dropout", 0.1)),
         ).to(device)
         class_weight_power = float(training.get("stage1_class_weight_power", 0.5))
+        learning_rate = float(training.get("stage1_learning_rate", training["learning_rate"]))
+        weight_decay = float(training.get("stage1_weight_decay", training["weight_decay"]))
     else:
         feature_dim = train_loader.dataset.feature_dim
         if feature_dim <= 0:
@@ -117,17 +167,20 @@ def train_stage(stage: int, train_loader, val_loader, device, cfg: dict):
             fusion_dropout=float(arch.get("fusion_dropout", 0.25)),
         ).to(device)
         class_weight_power = float(training.get("stage2_class_weight_power", 0.8))
+        learning_rate = float(training.get("stage2_learning_rate", training["learning_rate"]))
+        weight_decay = float(training.get("stage2_weight_decay", training["weight_decay"]))
+        if bool(cfg["cascade"].get("transfer_stage1_encoder", True)):
+            if stage1_model is None:
+                raise ValueError("stage-2 transfer requested but stage-1 model was not supplied")
+            initialize_stage2_from_stage1(model, stage1_model)
+            print("Initialized stage-2 SE-ResNet encoder from stage 1")
 
     original = train_loader.dataset.records["label_id"].to_numpy(dtype=int)
     binary = (original != 0).astype(int) if stage == 1 else (original == 1).astype(int)
     counts = np.bincount(binary, minlength=2)
     weights = normalized_class_weights(counts, class_weight_power)
     criterion = nn.CrossEntropyLoss(weight=torch.tensor(weights, dtype=torch.float32, device=device))
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(training["learning_rate"]),
-        weight_decay=float(training["weight_decay"]),
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
     best_score = -np.inf
     best_state = None
@@ -172,12 +225,14 @@ def train_stage(stage: int, train_loader, val_loader, device, cfg: dict):
         "binary_class_counts": counts.tolist(),
         "class_weights": weights.tolist(),
         "class_weight_power": class_weight_power,
+        "learning_rate": learning_rate,
+        "weight_decay": weight_decay,
         "model": "seresnet" if stage == 1 else "morphology_fusion",
     }
 
 
 def ensure_waveform_paths(manifest: pd.DataFrame, data_dir: Path) -> pd.DataFrame:
-    """Restore filename_hr from official PTB-XL metadata when an older manifest omitted it."""
+    """Restore filename_hr from official PTB-XL metadata when needed."""
     if "filename_hr" in manifest.columns and manifest["filename_hr"].notna().all():
         return manifest
     metadata_path = data_dir / "ptbxl_database.csv"
@@ -196,11 +251,24 @@ def ensure_waveform_paths(manifest: pd.DataFrame, data_dir: Path) -> pd.DataFram
     return merged
 
 
-def main() -> None:
-    import torch
+def make_loader(dataset, batch_size: int, workers: int, pin_memory: bool, shuffle: bool):
     from torch.utils.data import DataLoader
 
-    parser = argparse.ArgumentParser(description="Train an optimized MI -> STEMI/NSTEMI ECG cascade.")
+    kwargs = {
+        "batch_size": batch_size,
+        "num_workers": workers,
+        "pin_memory": pin_memory,
+        "shuffle": shuffle,
+    }
+    if workers > 0:
+        kwargs.update(persistent_workers=True, prefetch_factor=2)
+    return DataLoader(dataset, **kwargs)
+
+
+def main() -> None:
+    import torch
+
+    parser = argparse.ArgumentParser(description="Train a calibrated MI -> STEMI/NSTEMI ECG cascade.")
     parser.add_argument("--config", default="configs/cascade.yaml")
     parser.add_argument("--manifest", default="data/label_manifest.csv")
     parser.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"])
@@ -243,13 +311,13 @@ def main() -> None:
         if frame.empty or frame.label_id.nunique() < 2:
             raise ValueError(f"stage 2 requires both STEMI-proxy and NSTEMI-proxy in {split}")
 
-    feature_columns = [name for name in CASCADE_STAGE2_FEATURES if name in manifest.columns]
+    feature_profile = str(cfg["cascade"].get("stage2_feature_profile", "core"))
+    feature_columns = select_stage2_features(manifest, feature_profile)
     if not feature_columns:
-        raise ValueError(
-            "No safe stage-2 morphology features were found in the manifest. "
-            "Expected one or more of: " + ", ".join(CASCADE_STAGE2_FEATURES)
-        )
+        raise ValueError("No stage-2 morphology features were found in the manifest")
+    print(f"Stage 2 feature profile: {feature_profile}")
     print("Stage 2 morphology features:", ", ".join(feature_columns))
+
     feature_cfg = cfg["training"].get("feature_transform", {}) or {}
     stage2_transform = FeatureTransform.fit(
         stage2_frames["train"],
@@ -258,13 +326,13 @@ def main() -> None:
         add_missing_indicators=bool(feature_cfg.get("add_missing_indicators", True)),
     )
 
+    stage1_norm = str(data_cfg.get("stage1_waveform_normalization", data_cfg.get("waveform_normalization", "per_lead_zscore")))
+    stage2_norm = str(data_cfg.get("stage2_waveform_normalization", data_cfg.get("waveform_normalization", "per_lead_zscore")))
+    print(f"Stage 1 waveform normalization: {stage1_norm}")
+    print(f"Stage 2 waveform normalization: {stage2_norm}")
+
     def stage1_dataset(frame):
-        return PTBXL500Dataset(
-            frame,
-            data_dir,
-            feature_columns=[],
-            waveform_normalization=str(data_cfg.get("waveform_normalization", "per_lead_zscore")),
-        )
+        return PTBXL500Dataset(frame, data_dir, feature_columns=[], waveform_normalization=stage1_norm)
 
     def stage2_dataset(frame):
         return PTBXL500Dataset(
@@ -272,57 +340,63 @@ def main() -> None:
             data_dir,
             feature_columns=feature_columns,
             feature_transform=stage2_transform,
-            waveform_normalization=str(data_cfg.get("waveform_normalization", "per_lead_zscore")),
+            waveform_normalization=stage2_norm,
         )
 
     batch_size = int(cfg["training"]["batch_size"])
     workers = int(cfg["training"]["num_workers"])
     pin_memory = device.type == "cuda"
-    loader_kwargs = {
-        "batch_size": batch_size,
-        "num_workers": workers,
-        "pin_memory": pin_memory,
-    }
-    if workers > 0:
-        loader_kwargs.update(persistent_workers=True, prefetch_factor=2)
 
     stage1_datasets = {name: stage1_dataset(frame) for name, frame in full_frames.items()}
     stage2_datasets = {name: stage2_dataset(frame) for name, frame in stage2_frames.items()}
     stage2_full_datasets = {name: stage2_dataset(frame) for name, frame in full_frames.items()}
 
-    stage1_loaders = {
-        name: DataLoader(ds, shuffle=(name == "train"), **loader_kwargs)
+    # Training loaders may shuffle. All reporting/calibration loaders are
+    # deterministic so prediction rows stay aligned with their data frames.
+    stage1_train_loader = make_loader(stage1_datasets["train"], batch_size, workers, pin_memory, shuffle=True)
+    stage2_train_loader = make_loader(stage2_datasets["train"], batch_size, workers, pin_memory, shuffle=True)
+    stage1_eval_loaders = {
+        name: make_loader(ds, batch_size, workers, pin_memory, shuffle=False)
         for name, ds in stage1_datasets.items()
     }
-    stage2_loaders = {
-        name: DataLoader(ds, shuffle=(name == "train"), **loader_kwargs)
+    stage2_eval_loaders = {
+        name: make_loader(ds, batch_size, workers, pin_memory, shuffle=False)
         for name, ds in stage2_datasets.items()
     }
-    stage2_full_loaders = {
-        name: DataLoader(ds, shuffle=False, **loader_kwargs)
+    stage2_full_eval_loaders = {
+        name: make_loader(ds, batch_size, workers, pin_memory, shuffle=False)
         for name, ds in stage2_full_datasets.items()
     }
 
     out_dir = ROOT / (args.out_dir or cfg["output"]["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Training stage 1: MI vs non-MI (high-recall gate)")
-    stage1, stage1_history, stage1_train_info = train_stage(1, stage1_loaders["train"], stage1_loaders["val"], device, cfg)
-    y1_val, p1_val = predict_binary(stage1, stage1_loaders["val"], device, stage=1)
+    print("Training stage 1: MI vs non-MI")
+    stage1, stage1_history, stage1_train_info = train_stage(
+        1,
+        stage1_train_loader,
+        stage1_eval_loaders["val"],
+        device,
+        cfg,
+    )
+    y1_val, p1_val = predict_binary(stage1, stage1_eval_loaders["val"], device, stage=1)
     mi_threshold, mi_threshold_summary, mi_candidates = calibrate_binary_threshold(
         y1_val,
         p1_val,
         minimum_recall=cfg["cascade"].get("stage1_minimum_recall"),
     )
     mi_candidates.to_csv(out_dir / "stage1_mi_threshold_candidates.csv", index=False)
-    print(
-        f"Selected stage-1 threshold={mi_threshold:.6f} "
-        f"with validation recall={mi_threshold_summary['recall']:.4f}"
-    )
 
     print("Training stage 2: morphology-fusion STEMI-proxy vs NSTEMI-proxy")
-    stage2, stage2_history, stage2_train_info = train_stage(2, stage2_loaders["train"], stage2_loaders["val"], device, cfg)
-    y2_val, p2_val = predict_binary(stage2, stage2_loaders["val"], device, stage=2)
+    stage2, stage2_history, stage2_train_info = train_stage(
+        2,
+        stage2_train_loader,
+        stage2_eval_loaders["val"],
+        device,
+        cfg,
+        stage1_model=stage1,
+    )
+    y2_val, p2_val = predict_binary(stage2, stage2_eval_loaders["val"], device, stage=2)
     stemi_threshold, stemi_threshold_summary, stemi_candidates = calibrate_binary_threshold(
         y2_val,
         p2_val,
@@ -330,14 +404,42 @@ def main() -> None:
     )
     stemi_candidates.to_csv(out_dir / "stage2_stemi_threshold_candidates.csv", index=False)
 
+    # Final three-class calibration uses the full validation fold and never the
+    # held-out test fold. This is the primary v3 decision rule.
+    _, p_stemi_val_full = predict_binary(stage2, stage2_full_eval_loaders["val"], device, stage=2)
+    final_cfg = cfg["cascade"].get("final_soft_calibration", {}) or {}
+    final_calibration, final_candidates = calibrate_soft_cascade(
+        full_frames["val"]["label_id"].to_numpy(dtype=int),
+        p1_val,
+        p_stemi_val_full,
+        minimum_stemi_recall=final_cfg.get("minimum_stemi_recall"),
+        bias_min=float(final_cfg.get("bias_min", -2.0)),
+        bias_max=float(final_cfg.get("bias_max", 2.0)),
+        bias_step=float(final_cfg.get("bias_step", 0.1)),
+    )
+    final_candidates.to_csv(out_dir / "val_soft_calibration_candidates.csv", index=False)
+    print(
+        "Selected final soft calibration: "
+        f"mi_bias={final_calibration['mi_logit_bias']:.2f}, "
+        f"stemi_bias={final_calibration['stemi_logit_bias']:.2f}, "
+        f"val_macro_f1={final_calibration['macro_f1']:.4f}, "
+        f"val_bal_acc={final_calibration['balanced_accuracy']:.4f}, "
+        f"val_stemi_recall={final_calibration['stemi_recall']:.4f}"
+    )
+
     summary: dict[str, object] = {
         "device": str(device),
+        "primary_routing": "validation_calibrated_soft_hierarchy",
+        "stage1_waveform_normalization": stage1_norm,
+        "stage2_waveform_normalization": stage2_norm,
+        "stage2_feature_profile": feature_profile,
         "stage2_feature_columns": feature_columns,
         "stage2_feature_transform": stage2_transform.to_dict(),
-        "mi_threshold": mi_threshold,
-        "stemi_given_mi_threshold": stemi_threshold,
+        "mi_threshold_for_hard_baseline": mi_threshold,
+        "stemi_given_mi_threshold_for_hard_baseline": stemi_threshold,
         "stage1_threshold_selection": mi_threshold_summary,
         "stage2_threshold_selection": stemi_threshold_summary,
+        "final_soft_calibration": final_calibration,
         "stage1_train": stage1_train_info,
         "stage2_train": stage2_train_info,
         "stage1_history": stage1_history,
@@ -345,15 +447,24 @@ def main() -> None:
         "splits": {},
     }
 
+    mi_bias = float(final_calibration["mi_logit_bias"])
+    stemi_bias = float(final_calibration["stemi_logit_bias"])
+
     for split in ("train", "val", "test"):
-        y1, p_mi = predict_binary(stage1, stage1_loaders[split], device, stage=1)
+        y1, p_mi = predict_binary(stage1, stage1_eval_loaders[split], device, stage=1)
         stage1_metrics = binary_metrics(y1, p_mi, threshold=mi_threshold)
 
-        y2, p_stemi_mi_subset = predict_binary(stage2, stage2_loaders[split], device, stage=2)
+        y2, p_stemi_mi_subset = predict_binary(stage2, stage2_eval_loaders[split], device, stage=2)
         stage2_metrics = binary_metrics(y2, p_stemi_mi_subset, threshold=stemi_threshold)
 
-        _, p_stemi_given_mi = predict_binary(stage2, stage2_full_loaders[split], device, stage=2)
-        soft_probabilities = compose_soft_cascade(p_mi, p_stemi_given_mi)
+        _, p_stemi_given_mi = predict_binary(stage2, stage2_full_eval_loaders[split], device, stage=2)
+        raw_soft = compose_soft_cascade(p_mi, p_stemi_given_mi)
+        calibrated_soft = compose_calibrated_soft_cascade(
+            p_mi,
+            p_stemi_given_mi,
+            mi_logit_bias=mi_bias,
+            stemi_logit_bias=stemi_bias,
+        )
         hard_probabilities, hard_predictions = compose_hard_cascade(
             p_mi,
             p_stemi_given_mi,
@@ -362,31 +473,58 @@ def main() -> None:
         )
 
         y_three = full_frames[split]["label_id"].to_numpy(dtype=int)
-        final_metrics = write_split_artifacts(
+        # Primary artifacts are calibrated soft routing. Hard and raw-soft are
+        # retained in subdirectories as ablations.
+        primary_metrics = write_split_artifacts(
             out_dir,
+            split,
+            y_three,
+            calibrated_soft,
+            full_frames[split],
+            stemi_threshold=None,
+        )
+        raw_soft_metrics = write_split_artifacts(
+            out_dir / "soft_uncalibrated",
+            split,
+            y_three,
+            raw_soft,
+            full_frames[split],
+            stemi_threshold=None,
+        )
+        hard_metrics = write_split_artifacts(
+            out_dir / "hard_baseline",
             split,
             y_three,
             hard_probabilities,
             full_frames[split],
             stemi_threshold=None,
         )
-        pd.DataFrame(
+
+        details = pd.DataFrame(
             {
                 "ecg_id": full_frames[split]["ecg_id"].to_numpy() if "ecg_id" in full_frames[split] else np.arange(len(y_three)),
                 "actual_id": y_three,
                 "p_mi": p_mi,
                 "p_stemi_given_mi": p_stemi_given_mi,
-                "soft_prob_non_mi": soft_probabilities[:, 0],
-                "soft_prob_stemi_proxy": soft_probabilities[:, 1],
-                "soft_prob_nstemi_proxy": soft_probabilities[:, 2],
+                "raw_soft_non_mi": raw_soft[:, 0],
+                "raw_soft_stemi_proxy": raw_soft[:, 1],
+                "raw_soft_nstemi_proxy": raw_soft[:, 2],
+                "calibrated_soft_non_mi": calibrated_soft[:, 0],
+                "calibrated_soft_stemi_proxy": calibrated_soft[:, 1],
+                "calibrated_soft_nstemi_proxy": calibrated_soft[:, 2],
+                "calibrated_soft_prediction": calibrated_soft.argmax(axis=1),
                 "hard_cascade_prediction": hard_predictions,
             }
-        ).to_csv(out_dir / f"{split}_cascade_details.csv", index=False)
+        )
+        details.to_csv(out_dir / f"{split}_cascade_details.csv", index=False)
+
         summary["splits"][split] = {
             "stage1_mi_vs_non_mi": stage1_metrics,
             "stage2_stemi_vs_nstemi_on_true_mi": stage2_metrics,
-            "final_three_class": final_metrics,
-            "routed_to_stage2": int((p_mi >= mi_threshold).sum()),
+            "final_three_class_calibrated_soft": primary_metrics,
+            "final_three_class_uncalibrated_soft": raw_soft_metrics,
+            "final_three_class_hard_baseline": hard_metrics,
+            "routed_to_stage2_under_hard_gate": int((p_mi >= mi_threshold).sum()),
             "total_records": int(len(p_mi)),
         }
 
@@ -395,6 +533,7 @@ def main() -> None:
             "state_dict": stage1.state_dict(),
             "architecture": cfg["architecture"]["stage1"],
             "threshold": mi_threshold,
+            "waveform_normalization": stage1_norm,
             "target": "MI_vs_non_MI",
         },
         out_dir / "stage1_mi_vs_non_mi.pt",
@@ -404,7 +543,9 @@ def main() -> None:
             "state_dict": stage2.state_dict(),
             "architecture": cfg["architecture"]["stage2"],
             "threshold": stemi_threshold,
+            "waveform_normalization": stage2_norm,
             "target": "STEMI_proxy_vs_NSTEMI_proxy_given_MI",
+            "feature_profile": feature_profile,
             "feature_columns": feature_columns,
             "feature_transform": stage2_transform.to_dict(),
         },

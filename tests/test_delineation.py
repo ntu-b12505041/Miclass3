@@ -1,6 +1,8 @@
+import inspect
+
 import numpy as np
 
-from miclass3.delineation import extract_morphology_features
+from miclass3.delineation import _metadata_has_lbbb, _select_lbbb, extract_morphology_features
 from miclass3.morphology import LEADS
 
 
@@ -67,3 +69,12 @@ def test_ecgdeli_backend_uses_external_fiducials_without_changing_label_rules():
     assert features["delineation_backend"] == "ecgdeli"
     assert features["standard_stemi"] is True
     assert beats[0]["fiducial_source"] == "ecgdeli"
+
+
+def test_primary_lbbb_route_uses_positive_scp_code_only():
+    assert inspect.signature(extract_morphology_features).parameters["lbbb_source"].default == "scp"
+    assert _metadata_has_lbbb({"scp_codes": {"LBBB": 100}})
+    assert not _metadata_has_lbbb({"scp_codes": {"LBBB": 0, "IMI": 100}})
+    assert _select_lbbb(raw_lbbb=True, scp_lbbb=False) is False
+    assert _select_lbbb(raw_lbbb=True, scp_lbbb=False, source="either") is True
+    assert _select_lbbb(raw_lbbb=False, scp_lbbb=True, source="scp") is True

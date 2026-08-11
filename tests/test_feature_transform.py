@@ -23,7 +23,7 @@ def test_feature_transform_uses_training_statistics_and_preserves_binary_flags()
     assert np.isfinite(values).all()
 
 
-def test_extended_feature_profile_keeps_ecg_inputs_and_excludes_target_columns():
+def test_extended_feature_profile_excludes_direct_label_routing_flags_by_default():
     frame = pd.DataFrame(
         {
             "max_st_j_mv": [0.1], "lbbb": [0], "age": [62], "sex": [1],
@@ -32,8 +32,21 @@ def test_extended_feature_profile_keeps_ecg_inputs_and_excludes_target_columns()
         }
     )
     features = select_model_features(frame, "extended")
-    assert {"max_st_j_mv", "lbbb", "age", "sex", "st_j_V1_mv"} <= set(features)
+    assert {"max_st_j_mv", "age", "sex", "st_j_V1_mv"} <= set(features)
+    assert "lbbb" not in features
     assert "label" not in features and "label_id" not in features and "scp_codes" not in features
+
+
+def test_routing_flag_ablation_can_restore_lbbb_and_modified_sgarbossa():
+    frame = pd.DataFrame(
+        {
+            "max_st_j_mv": [0.1],
+            "lbbb": [1],
+            "modified_sgarbossa_positive": [0],
+        }
+    )
+    features = select_model_features(frame, include_label_routing_flags=True)
+    assert features == ["max_st_j_mv", "lbbb", "modified_sgarbossa_positive"]
 
 
 def test_global_waveform_normalization_preserves_relative_lead_amplitude():

@@ -20,9 +20,8 @@ CORE_MORPHOLOGY_FEATURES = (
     "max_st_j60_mv",
     "max_st_s_ratio",
     "qrs_duration_ms",
-    "lbbb",
-    "modified_sgarbossa_positive",
 )
+LABEL_ROUTING_FEATURES = ("lbbb", "modified_sgarbossa_positive")
 EXTENDED_MORPHOLOGY_BASE_FEATURES = (
     "age",
     "sex",
@@ -40,17 +39,26 @@ EXTENDED_MORPHOLOGY_BASE_FEATURES = (
 LEAD_MORPHOLOGY_PREFIXES = ("st_j_", "st_j60_", "s_depth_", "qrs_polarity_")
 
 
-def select_model_features(frame: pd.DataFrame, profile: str = "core") -> list[str]:
+def select_model_features(
+    frame: pd.DataFrame,
+    profile: str = "core",
+    include_label_routing_flags: bool = False,
+) -> list[str]:
     """Select auditable, non-target-leaking morphology model inputs.
 
     ``extended`` adds lead-specific ST/J, S-wave, QRS-polarity, timing, age,
-    and sex information. It intentionally excludes label outputs and
-    diagnostic SCP statements. The same column order is used for every fold.
+    and sex information. Direct routing flags used to construct the proxy
+    label (LBBB and modified-Sgarbossa positivity) are excluded by default;
+    they can be restored only for a pre-specified ablation. Label outputs and
+    diagnostic SCP statements are always excluded. The same column order is
+    used for every fold.
     """
     profile = str(profile).lower()
     if profile not in {"core", "extended"}:
         raise ValueError("feature profile must be 'core' or 'extended'")
     requested = list(CORE_MORPHOLOGY_FEATURES)
+    if include_label_routing_flags:
+        requested.extend(LABEL_ROUTING_FEATURES)
     if profile == "extended":
         requested.extend(EXTENDED_MORPHOLOGY_BASE_FEATURES)
         requested.extend(
@@ -90,8 +98,8 @@ class FeatureTransform:
     Continuous morphology values have very different units (mV versus ms), so
     passing their raw values to a shared linear layer makes optimization depend
     unnecessarily on their scale. Binary evidence fields deliberately remain
-    0/1 because they are also used as auxiliary targets. Missingness flags are
-    appended so median imputation cannot silently look like a measured value.
+    0/1. Missingness flags are appended so median imputation cannot silently
+    look like a measured value.
     """
 
     columns: tuple[str, ...]
@@ -128,8 +136,7 @@ class FeatureTransform:
             binary_mask[index] = bool(np.isin(unique, (0.0, 1.0)).all())
             impute_values[index] = float(np.median(observed))
             if binary_mask[index]:
-                # Preserve binary flags as exact 0/1 values. In particular,
-                # the LBBB head must never train on a normalized target.
+                # Preserve any ablation-only binary inputs as exact 0/1 values.
                 continue
             q1, q3 = np.quantile(observed, (0.25, 0.75))
             robust_scale = float((q3 - q1) / 1.349)
@@ -204,6 +211,7 @@ class PTBXL500Dataset:
         feature_columns: list[str] | None = None,
         feature_transform: FeatureTransform | None = None,
         waveform_normalization: str = "per_lead_zscore",
+        auxiliary_columns: list[str] | None = None,
     ):
         self.records = manifest.reset_index(drop=True)
         self.root = Path(data_dir)
@@ -212,6 +220,7 @@ class PTBXL500Dataset:
             self.records, self.feature_columns, add_missing_indicators=False
         )
         self.waveform_normalization = waveform_normalization
+        self.auxiliary_columns = auxiliary_columns or []
         if tuple(self.feature_columns) != self.feature_transform.columns:
             raise ValueError("feature_columns must match the fitted feature transform")
 
@@ -230,4 +239,12 @@ class PTBXL500Dataset:
         signal, _ = wfdb.rdsamp(str(self.root / row["filename_hr"]))
         x = normalize_ecg_waveform(signal, self.waveform_normalization)
         features = self.feature_transform.transform(row.reindex(self.feature_columns).to_numpy())
-        return torch.from_numpy(x), torch.tensor(int(row["label_id"])), torch.from_numpy(features)
+        batch = (torch.from_numpy(x), torch.tensor(int(row["label_id"])), torch.from_numpy(features))
+        if not self.auxiliary_columns:
+            return batch
+        auxiliary = (
+            pd.to_numeric(row.reindex(self.auxiliary_columns), errors="coerce")
+            .fillna(0)
+            .to_numpy(dtype=np.float32)
+        )
+        return (*batch, torch.from_numpy(auxiliary))

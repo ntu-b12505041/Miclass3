@@ -259,6 +259,23 @@ def _raw_lbbb(qrs_duration_ms: float, polarities: dict[str, int]) -> bool:
     return bool(v1_negative and lateral_positive)
 
 
+def _select_lbbb(raw_lbbb: bool, scp_lbbb: bool, source: str = "scp") -> bool:
+    """Select the auditable LBBB route used by the labeler.
+
+    SCP-coded LBBB is the primary protocol. The simplified waveform rule is
+    retained only for pre-specified sensitivity analyses because it is not a
+    complete clinical LBBB definition.
+    """
+    source = str(source).strip().lower()
+    if source == "scp":
+        return bool(scp_lbbb)
+    if source == "raw":
+        return bool(raw_lbbb)
+    if source == "either":
+        return bool(raw_lbbb or scp_lbbb)
+    raise ValueError("lbbb_source must be 'scp', 'raw', or 'either'")
+
+
 def _extract_from_fiducials(
     signal: np.ndarray,
     fs: int,
@@ -266,7 +283,7 @@ def _extract_from_fiducials(
     age: float | None = None,
     sex: str | int | None = None,
     metadata_row: Mapping[str, object] | None = None,
-    lbbb_source: str = "either",
+    lbbb_source: str = "scp",
     backend: str = "custom",
     requested_backend: str | None = None,
     fallback_reason: str | None = None,
@@ -373,12 +390,7 @@ def _extract_from_fiducials(
     qrs_duration_ms = float(np.nanmedian(qrs_durations)) if qrs_durations else float("nan")
     raw_lbbb = _raw_lbbb(qrs_duration_ms, median_polarity)
     scp_lbbb = _metadata_has_lbbb(metadata_row)
-    if lbbb_source == "raw":
-        lbbb = raw_lbbb
-    elif lbbb_source == "scp":
-        lbbb = scp_lbbb
-    else:
-        lbbb = raw_lbbb or scp_lbbb
+    lbbb = _select_lbbb(raw_lbbb, scp_lbbb, lbbb_source)
     standard_stemi = False if lbbb else standard_stemi_from_jpoints(median_st_j, sex, age)
     modified_positive = bool(lbbb and modified_sgarbossa_positive(median_st_j, median_s_depth, median_polarity))
     finite_st = [value for value in median_st_j.values() if np.isfinite(value)]
@@ -428,7 +440,7 @@ def extract_morphology_features(
     age: float | None = None,
     sex: str | int | None = None,
     metadata_row: Mapping[str, object] | None = None,
-    lbbb_source: str = "either",
+    lbbb_source: str = "scp",
     backend: str = "custom",
     external_fiducials: Sequence[Mapping[str, object]] | None = None,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
@@ -436,7 +448,8 @@ def extract_morphology_features(
 
     ``backend`` controls only P-QRS-T/fiducial point acquisition. The downstream
     ST elevation, LBBB, modified Sgarbossa and label-facing feature rules remain
-    identical across backends.
+    identical across backends. ``lbbb_source='scp'`` is the primary protocol;
+    ``raw`` and ``either`` are reserved for sensitivity analyses.
     """
     if signal.ndim != 2 or signal.shape[1] != len(LEADS):
         raise ValueError(f"expected signal shape (samples, {len(LEADS)}), got {signal.shape}")

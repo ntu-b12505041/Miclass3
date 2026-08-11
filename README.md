@@ -15,14 +15,14 @@ The third class is deliberately named **NSTEMI-proxy** in code and reporting. PT
 ```text
 records500 ECG ──> 12-lead normalization ──> selected neural encoder ──> 3 proxy classes
                          │
-                         └─> J-point / ST-S / QRS / LBBB evidence ──> fusion model + auxiliary heads
+                         └─> J-point / ST-S / QRS evidence ──> fusion model + auxiliary heads
 ```
 
 The project intentionally keeps only three strong candidates:
 
 | Model | Use | Why it is included |
 |---|---|---|
-| `morphology_fusion` | Primary | SE-ResNet waveform encoder fused with auditable J-point, ST/S, QRS-duration and LBBB features; auxiliary STEMI head regularizes the noisy proxy target. |
+| `morphology_fusion` | Primary | SE-ResNet waveform encoder fused with auditable continuous J-point, ST/S, and QRS-duration features. Direct LBBB/mSgarbossa routing flags are withheld from the primary classifier. |
 | `inceptiontime` | Independent high-capacity comparison | Parallel receptive fields capture narrow QRS and slower ST/T morphology without handcrafted fusion. |
 | `seresnet` | Robust waveform baseline | Residual multi-scale representation with squeeze-excitation learns lead importance and is easier to calibrate. |
 
@@ -56,7 +56,7 @@ python scripts/extract_morphology.py --data-dir data/ptbxl --backend neurokit --
 python scripts/extract_morphology.py --data-dir data/ptbxl --backend ecgdeli --ecgdeli-fiducials data/ecgdeli_fiducials.csv --out data/morphology_features_ecgdeli.csv --beats-out data/morphology_beats_ecgdeli.csv --label-out data/label_manifest_ecgdeli.csv
 ```
 
-`--backend` changes only P-QRS-T/fiducial point acquisition. The downstream J-point STEMI rule, LBBB routing, modified Sgarbossa rule, old-MI exclusion, and NSTEMI-proxy rule stay unchanged.
+`--backend` changes only P-QRS-T/fiducial point acquisition. The primary LBBB route uses a positive LBBB entry in `scp_codes`; `--lbbb-source either` and `raw` are sensitivity analyses only. Old MI is excluded only for `Stadium III`, while the ambiguous transition category `Stadium II-III` remains in the primary cohort.
 
 This writes the record-level morphology table, a beat-level P-QRS-T/J-point audit table, and the final training label manifest. See [the morphology extractor guide](docs/morphology_extractor.md).
 
@@ -104,6 +104,9 @@ For VS Code GPU setup, see [the GPU training guide](docs/vscode_gpu_training.md)
 
 For AI coding agents, start with [the AI agent runbook](docs/ai_agent_runbook.md). It gives the exact order for data checks, raw ECG morphology extraction, label manifest creation, GPU smoke testing, full training, and results reporting.
 
+For the corrected IECBES 2026 label audit and complete pre-specified run matrix,
+use [the corrected experiment protocol](docs/iecbes2026_corrected_protocol.md).
+
 The model is selected on fold 9 macro-AUPRC and evaluated once on fold 10. Every completed training run writes a complete results bundle under `artifacts/`:
 
 - `train|val|test_metrics.json`: accuracy, balanced accuracy, macro-AUROC, macro-AUPRC, macro-F1, STEMI-proxy recall, sample count, and the raw confusion matrix.
@@ -137,8 +140,9 @@ Never report the test result as clinical NSTEMI diagnostic accuracy.
 ## Research safeguards
 
 - Patient-level official PTB-XL folds are retained.
-- Old infarction stages are excluded rather than silently relabeled as NSTEMI-proxy.
-- LBBB is routed through modified Sgarbossa, not ordinary ST elevation rules.
+- PTB-XL `Stadium III` MI is excluded rather than silently relabeled as NSTEMI-proxy; `Stadium II-III` is retained as an explicitly acknowledged ambiguous transition category.
+- SCP-coded LBBB is routed through modified Sgarbossa, not ordinary ST elevation rules; the simplified raw-LBBB rule is sensitivity-only.
+- Direct LBBB and modified-Sgarbossa routing flags are excluded from the primary classifier inputs.
 - Morphology evidence remains in the label manifest, so every label is auditable.
 - A future hospital cohort with serial hs-cTn and adjudication must be used for clinical validation before any diagnostic claim.
 

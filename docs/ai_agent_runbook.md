@@ -15,7 +15,7 @@ Do not describe `nstemi_proxy` as clinically adjudicated NSTEMI. PTB-XL does not
 1. Do not fabricate metrics, confusion matrices, label counts, or training results.
 2. Do not train until `data/ptbxl/records500/` exists.
 3. Prefer the raw ECG morphology extractor over hand-written morphology tables.
-4. Keep old MI and failed morphology records excluded from training.
+4. Exclude PTB-XL `Stadium III` MI and failed morphology records from training; retain `Stadium II-III` in the primary cohort.
 5. Use official PTB-XL folds: train folds 1-8, validation fold 9, test fold 10.
 6. Report every generated result from files under `artifacts/`, not from memory.
 
@@ -70,7 +70,7 @@ python scripts/extract_morphology.py --data-dir data/ptbxl --backend neurokit --
 python scripts/extract_morphology.py --data-dir data/ptbxl --backend ecgdeli --ecgdeli-fiducials data/ecgdeli_fiducials.csv --out data/morphology_features_ecgdeli.csv --beats-out data/morphology_beats_ecgdeli.csv --label-out data/label_manifest_ecgdeli.csv
 ```
 
-Changing `--backend` changes only P-QRS-T/fiducial point acquisition. Do not change the downstream STEMI, LBBB, modified Sgarbossa, old-MI exclusion, or NSTEMI-proxy rules when comparing backends.
+Changing `--backend` changes only P-QRS-T/fiducial point acquisition. The primary protocol uses SCP-positive LBBB, modified Sgarbossa routing, and `Stadium III` old-MI exclusion. Use `--lbbb-source raw` or `either` only for pre-specified sensitivity runs.
 
 The extractor writes:
 
@@ -110,12 +110,14 @@ before/after subsample counts, and training-fold counts are saved in
 `artifacts/<run>/metrics.json`.
 
 In `morphology_fusion`, the optional LBBB auxiliary head predicts the
-extractor's LBBB flag from the raw ECG embedding.  The model also has two
+SCP-derived LBBB target from the raw ECG embedding. The target is supplied
+separately and is not a primary classifier input. The model also has two
 lightweight hierarchy heads: MI vs non-MI and STEMI-proxy vs non-STEMI-proxy.
 They regularize the encoder around the two clinically meaningful boundaries,
 while `class_logits` remains the only three-class output used for metrics.
 These are morphology/label-derived auxiliary targets, not new clinical
-endpoints.
+endpoints. Direct `lbbb` and `modified_sgarbossa_positive` routing flags are
+excluded from primary fusion inputs and restored only in an explicit ablation.
 
 Optional comparison models:
 

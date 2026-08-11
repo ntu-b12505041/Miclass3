@@ -26,7 +26,8 @@ def sync_device(device: torch.device) -> None:
 def predict(model, loader, device):
     model.eval(); probs=[]; ys=[]
     with torch.no_grad():
-        for x, y, f in loader:
+        for batch in loader:
+            x, y, f = batch[:3]
             out = model(x.to(device), f.to(device))["class_logits"]
             probs.append(torch.softmax(out, 1).cpu().numpy()); ys.append(y.numpy())
     return np.concatenate(ys), np.concatenate(probs)
@@ -134,6 +135,18 @@ def main() -> None:
     p.add_argument("--config", default="configs/default.yaml"); p.add_argument("--manifest", default="data/label_manifest.csv")
     p.add_argument("--model", choices=["morphology_fusion", "inceptiontime", "seresnet"])
     p.add_argument("--device", default="auto", choices=["auto", "cuda", "cpu"]); p.add_argument("--max-records", type=int)
+    p.add_argument("--seed", type=int, help="Override config seed for a pre-specified repeat.")
+    p.add_argument(
+        "--include-label-routing-flags",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include LBBB and modified-Sgarbossa flags as classifier inputs (ablation only).",
+    )
+    p.add_argument(
+        "--lbbb-auxiliary-weight",
+        type=float,
+        help="Override the waveform-only LBBB auxiliary loss weight.",
+    )
     p.add_argument("--out-dir", default="artifacts")
     p.add_argument(
         "--skip-test",
@@ -141,6 +154,12 @@ def main() -> None:
         help="Write train/validation artifacts only; use during validation-only hyperparameter tuning.",
     )
     args = p.parse_args(); cfg = yaml.safe_load((ROOT / args.config).read_text())
+    if args.seed is not None:
+        cfg["seed"] = int(args.seed)
+    if args.include_label_routing_flags is not None:
+        cfg["training"]["include_label_routing_flags"] = bool(args.include_label_routing_flags)
+    if args.lbbb_auxiliary_weight is not None:
+        cfg["training"]["lbbb_auxiliary_weight"] = float(args.lbbb_auxiliary_weight)
     folds = cfg["data"]
     data_dir = ROOT / folds["data_dir"]
     records500 = data_dir / "records500"
@@ -159,12 +178,18 @@ def main() -> None:
             "PyTorch is required for training. Install the project's requirements first."
         ) from exc
     seed = int(cfg["seed"]); random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
     manifest = pd.read_csv(ROOT / args.manifest).query("label_tier != 'excluded' and label_id.notna()", engine="python").copy()
     manifest["label_id"] = manifest["label_id"].astype(int)
     if args.max_records: manifest = manifest.groupby(["strat_fold", "label_id"], group_keys=False).apply(lambda x: x.sample(min(len(x), max(1, args.max_records // 30)), random_state=seed))
     feature_profile = str(cfg["training"].get("feature_profile", "core"))
-    feature_columns = select_model_features(manifest, feature_profile)
-    lbbb_feature_index = feature_columns.index("lbbb") if "lbbb" in feature_columns else None
+    include_label_routing_flags = bool(cfg["training"].get("include_label_routing_flags", False))
+    feature_columns = select_model_features(
+        manifest,
+        feature_profile,
+        include_label_routing_flags=include_label_routing_flags,
+    )
     subsets = {
         "train": manifest[manifest.strat_fold.isin(folds["train_folds"])].copy(),
         "val": manifest[manifest.strat_fold.isin(folds["val_folds"])].copy(),
@@ -180,6 +205,13 @@ def main() -> None:
         clip=float(feature_cfg.get("clip", 6.0)),
         add_missing_indicators=bool(feature_cfg.get("add_missing_indicators", True)),
     )
+    model_name = args.model or cfg["models"]["primary"]
+    lbbb_auxiliary_weight = float(cfg["training"].get("lbbb_auxiliary_weight", 0.0))
+    auxiliary_columns = (
+        ["lbbb"]
+        if model_name == "morphology_fusion" and lbbb_auxiliary_weight > 0 and "lbbb" in manifest
+        else []
+    )
     datasets = {
         name: PTBXL500Dataset(
             frame,
@@ -187,6 +219,7 @@ def main() -> None:
             feature_columns,
             feature_transform,
             waveform_normalization=str(folds.get("waveform_normalization", "per_lead_zscore")),
+            auxiliary_columns=auxiliary_columns,
         )
         for name, frame in subsets.items()
     }
@@ -203,7 +236,6 @@ def main() -> None:
         },
     }
     device = torch.device("cuda" if args.device == "auto" and torch.cuda.is_available() else args.device if args.device != "auto" else "cpu")
-    model_name = args.model or cfg["models"]["primary"]
     architecture = cfg["models"].get("architecture", {}) or {}
     model = make_model(model_name, datasets["train"].feature_dim, architecture=architecture).to(device)
     counts = subsets["train"].label_id.value_counts().reindex([0, 1, 2], fill_value=0).to_numpy()
@@ -251,7 +283,7 @@ def main() -> None:
     )
     lbbb_criterion = None
     lbbb_pos_weight = None
-    if lbbb_feature_index is not None and model_name == "morphology_fusion":
+    if auxiliary_columns and model_name == "morphology_fusion":
         lbbb_values = pd.to_numeric(subsets["train"]["lbbb"], errors="coerce").fillna(0).clip(0, 1).to_numpy(dtype=np.float32)
         lbbb_positive = int(lbbb_values.sum())
         lbbb_negative = int(len(lbbb_values) - lbbb_positive)
@@ -279,7 +311,9 @@ def main() -> None:
         sync_device(device)
         epoch_start = time.perf_counter()
         model.train(); losses=[]
-        for x, y, f in loaders["train"]:
+        for batch in loaders["train"]:
+            x, y, f = batch[:3]
+            auxiliary_targets = batch[3] if len(batch) == 4 else None
             outputs = model(x.to(device), f.to(device)); loss = criterion(outputs["class_logits"], y.to(device))
             if "stemi_logits" in outputs:
                 target = (y.to(device) == 1).float()
@@ -288,8 +322,10 @@ def main() -> None:
                 mi_target = (y.to(device) != 0).float()
                 loss = loss + training_cfg.get("mi_auxiliary_weight", 0.15) * mi_criterion(outputs["mi_logits"], mi_target)
             if lbbb_criterion is not None and "lbbb_logits" in outputs:
-                lbbb_target = f[:, lbbb_feature_index].to(device).clamp(0, 1)
-                loss = loss + training_cfg.get("lbbb_auxiliary_weight", 0.0) * lbbb_criterion(outputs["lbbb_logits"], lbbb_target)
+                if auxiliary_targets is None:
+                    raise RuntimeError("LBBB auxiliary loss requires the independent manifest target")
+                lbbb_target = auxiliary_targets[:, auxiliary_columns.index("lbbb")].to(device).clamp(0, 1)
+                loss = loss + lbbb_auxiliary_weight * lbbb_criterion(outputs["lbbb_logits"], lbbb_target)
             optimizer.zero_grad(set_to_none=True); loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0); optimizer.step(); losses.append(loss.item())
         sync_device(device)
         train_seconds = time.perf_counter() - epoch_start
@@ -362,6 +398,8 @@ def main() -> None:
         "train_class_counts": {str(i): int(counts[i]) for i in range(3)},
         "feature_profile": feature_profile,
         "feature_columns": feature_columns,
+        "include_label_routing_flags": include_label_routing_flags,
+        "auxiliary_target_columns": auxiliary_columns,
         "waveform_normalization": str(folds.get("waveform_normalization", "per_lead_zscore")),
         "architecture": architecture,
         "classification_loss": loss_name,
@@ -375,7 +413,7 @@ def main() -> None:
         "mi_auxiliary_weight": float(training_cfg.get("mi_auxiliary_weight", 0.15)),
         "auxiliary_mi_pos_weight": float(mi_pos_weight),
         "auxiliary_pos_weight_power": aux_power,
-        "lbbb_auxiliary_weight": float(training_cfg.get("lbbb_auxiliary_weight", 0.0)),
+        "lbbb_auxiliary_weight": lbbb_auxiliary_weight,
         "lbbb_auxiliary_pos_weight": lbbb_pos_weight,
         "feature_transform": feature_transform.to_dict(),
         "lr_scheduler": {

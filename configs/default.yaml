@@ -11,6 +11,8 @@ data:
   val_folds: [9]
   test_folds: [10]
 labels:
+  # The implementation maps the completed/old category Stadium III to this
+  # exclusion policy; Stadium II-III remains in the primary cohort.
   old_mi_policy: exclude
   require_morphology_for_stemi: true
 models:
@@ -32,6 +34,10 @@ training:
   # `extended` adds non-target-leaking morphology, timing, age/sex and
   # lead-specific ECG features. It is compared in configs/tuning.yaml.
   feature_profile: core
+  # Direct LBBB/mSgarbossa routing flags participate in proxy-label creation,
+  # so the primary classifier does not receive them. Enable only for the
+  # pre-specified routing-flag ablation.
+  include_label_routing_flags: false
   classification_loss: cross_entropy
   label_smoothing: 0.0
   focal_gamma: 1.5
@@ -59,8 +65,8 @@ training:
   # enabled; this keeps it from being dominated by negatives without creating
   # an excessively high positive gradient.
   auxiliary_pos_weight_power: 0.8
-  # Fit robust continuous-feature scaling on folds 1-8 only. Binary evidence
-  # stays 0/1 and missingness is made explicit for the fusion encoder.
+  # Fit robust continuous-feature scaling on folds 1-8 only. Any binary input
+  # retained in an ablation stays 0/1; missingness is explicit.
   feature_transform:
     clip: 6.0
     add_missing_indicators: true

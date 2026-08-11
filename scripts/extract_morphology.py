@@ -60,7 +60,15 @@ def main() -> None:
     parser.add_argument("--folds", help="Comma-separated PTB-XL strat_fold values to process, e.g. 9,10.")
     parser.add_argument("--ecg-ids", help="Comma-separated ECG IDs or a text file with one ECG ID per line.")
     parser.add_argument("--max-records", type=int, help="Debug limit after fold/ID filtering.")
-    parser.add_argument("--lbbb-source", choices=["either", "raw", "scp"], default="either")
+    parser.add_argument(
+        "--lbbb-source",
+        choices=["scp", "either", "raw"],
+        default="scp",
+        help=(
+            "LBBB route for proxy labeling. 'scp' is the primary protocol; "
+            "'either' and 'raw' are sensitivity analyses only."
+        ),
+    )
     parser.add_argument(
         "--backend",
         choices=["custom", "neurokit", "ecgdeli", "auto"],

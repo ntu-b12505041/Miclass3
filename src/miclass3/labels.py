@@ -33,7 +33,13 @@ def mi_scp_codes(scp: pd.DataFrame) -> set[str]:
 
 
 def _is_old_stage(value: object) -> bool:
-    return "old" in str(value).lower()
+    """Return whether PTB-XL marks the infarction as completed/old.
+
+    PTB-XL uses the canonical value ``Stadium III`` for the completed/old
+    infarction stage. ``Stadium II-III`` is deliberately retained because it
+    spans the subacute-to-chronic boundary and is not uniformly old MI.
+    """
+    return str(value).strip().casefold() == "stadium iii"
 
 
 def _truthy(row: Mapping[str, object], name: str) -> bool:
@@ -49,8 +55,9 @@ def label_record(
     """Create the agreed ECG-only proxy label.
 
     STEMI proxy requires either standard contiguous-lead J-point elevation or a
-    positive modified-Sgarbossa assessment for LBBB.  Every other non-old MI
-    SCP statement is NSTEMI-proxy by definition; it is not a clinical NSTEMI.
+    positive modified-Sgarbossa assessment for LBBB. Every other MI SCP
+    statement not marked ``Stadium III`` is NSTEMI-proxy by definition; it is
+    not a clinical NSTEMI.
     """
     codes = parse_scp_codes(row.get("scp_codes", {}))
     has_mi = any(code in mi_codes and score > 0 for code, score in codes.items())
@@ -59,7 +66,7 @@ def label_record(
 
     stages = (row.get("infarction_stadium1", ""), row.get("infarction_stadium2", ""), row.get("infarction_stage", ""))
     if any(_is_old_stage(stage) for stage in stages) and old_mi_policy == "exclude":
-        return LabelDecision("exclude_old_mi", None, "excluded", "old_infarction_stage")
+        return LabelDecision("exclude_old_mi", None, "excluded", "infarction_stadium_iii")
 
     morphology_quality = str(row.get("morphology_quality", "")).lower()
     if morphology_quality and morphology_quality not in {"nan", "none", "ok"}:

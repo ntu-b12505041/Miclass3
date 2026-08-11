@@ -63,7 +63,7 @@ For each ECG after fiducials are available:
 6. Aggregate clean beats by median per lead.
 7. Emit STEMI and LBBB/modified-Sgarbossa features.
 
-Standard STEMI is positive when at least two contiguous leads exceed the guideline J-point threshold. LBBB is conservatively detected from raw morphology by QRS duration >=120 ms, negative V1, and positive lateral leads, and can also use PTB-XL SCP LBBB statements. For LBBB, STEMI-equivalent morphology is decided by modified Sgarbossa rather than ordinary ST elevation.
+Standard STEMI is positive when at least two contiguous leads exceed the guideline J-point threshold. In the primary protocol, LBBB is positive only when `scp_codes` contains a positive LBBB code. For LBBB, STEMI-equivalent morphology is decided by modified Sgarbossa rather than ordinary ST elevation. The simplified raw rule (QRS duration >=120 ms, negative V1, and positive lateral leads) remains available through `--lbbb-source raw` or `either` for sensitivity analysis only.
 
 ## Outputs
 

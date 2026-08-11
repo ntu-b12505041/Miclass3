@@ -3,7 +3,11 @@ seed: 42
 data:
   source: ptb-xl-1.0.3
   data_dir: data/ptbxl
-  waveform_normalization: per_lead_zscore
+  # Stage 1 keeps the stable historical normalization used for MI detection.
+  stage1_waveform_normalization: per_lead_zscore
+  # Stage 2 preserves inter-lead amplitude relationships, which matter for ST
+  # morphology and contiguous-lead STEMI patterns.
+  stage2_waveform_normalization: lead_centered_global_scale
   train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
   val_folds: [9]
   test_folds: [10]
@@ -14,8 +18,9 @@ architecture:
     block_dropout: 0.10
   stage2:
     width: 64
-    block_dropout: 0.10
-    fusion_dropout: 0.25
+    # Slightly stronger regularization for the much smaller conditional task.
+    block_dropout: 0.15
+    fusion_dropout: 0.35
 
 training:
   batch_size: 32
@@ -26,38 +31,47 @@ training:
   num_workers: 0
   grad_clip_norm: 1.0
 
-  # Stage 1 already separates MI from non-MI well, so keep moderate weighting.
   stage1_class_weight_power: 0.5
-
-  # Stage 2 has a much rarer STEMI-proxy positive class; stronger weighting
-  # helps the conditional classifier pay attention to it.
   stage2_class_weight_power: 0.8
 
-  # Fit morphology scaling only on fold 1-8 MI records used by stage 2.
+  # Fine-tuning a transferred encoder should move more conservatively than
+  # training stage 1 from scratch.
+  stage1_learning_rate: 0.0003
+  stage2_learning_rate: 0.00015
+  stage1_weight_decay: 0.0001
+  stage2_weight_decay: 0.0003
+
+  # Fit morphology scaling only on folds 1-8 MI records used by stage 2.
   feature_transform:
     clip: 6.0
     add_missing_indicators: true
 
 cascade:
-  # Stage 1: all records, target = MI (STEMI-proxy or NSTEMI-proxy) vs non-MI.
   stage1_name: mi_vs_non_mi
-
-  # The gate is intentionally recall-oriented. A false negative here can never
-  # be recovered by stage 2, whereas a false positive can still be classified
-  # downstream. Threshold selection remains validation-only (fold 9).
   stage1_minimum_recall: 0.90
 
-  # Stage 2: only true MI records during training, target = STEMI-proxy vs
-  # NSTEMI-proxy. Use waveform + morphology fusion rather than waveform-only.
   stage2_name: stemi_vs_nstemi
   stage2_model: morphology_fusion
-  stage2_feature_profile: core
+
+  # `lead_aware` keeps the global morphology summary and adds per-lead J-point,
+  # J+60, S-depth and QRS-polarity features when they exist. Direct target-rule
+  # fields such as standard_stemi and modified_sgarbossa_positive stay excluded.
+  stage2_feature_profile: lead_aware
   stage2_minimum_recall: null
 
-  # literal_hard_gate reproduces the requested sequential decision flow.
-  # Soft hierarchical probabilities are also exported for analysis.
-  routing_mode: literal_hard_gate
+  # Reuse the stage-1 SE-ResNet representation as the initialization for the
+  # stage-2 waveform encoder, then fine-tune jointly with morphology features.
+  transfer_stage1_encoder: true
+
+  # Primary decision rule: retain the probabilistic hierarchy and fit only two
+  # logit biases on validation fold 9. Fold 10 is never used for calibration.
+  routing_mode: validation_calibrated_soft_hierarchy
+  final_soft_calibration:
+    minimum_stemi_recall: 0.75
+    bias_min: -2.0
+    bias_max: 2.0
+    bias_step: 0.1
 
 output:
-  # Keep v1 artifacts intact for direct comparison.
-  out_dir: artifacts/cascade_v2
+  # Keep v1/v2 outputs intact for ablation comparison.
+  out_dir: artifacts/cascade_v3

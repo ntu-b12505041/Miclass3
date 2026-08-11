@@ -5,6 +5,18 @@ import pandas as pd
 from sklearn.metrics import balanced_accuracy_score, f1_score, recall_score
 
 
+def _clip_probability(values: np.ndarray, eps: float = 1e-6) -> np.ndarray:
+    return np.clip(np.asarray(values, dtype=float), eps, 1.0 - eps)
+
+
+def apply_binary_logit_bias(probability: np.ndarray, bias: float) -> np.ndarray:
+    """Shift binary probability in log-odds space without changing ranking."""
+    p = _clip_probability(probability)
+    logit = np.log(p) - np.log1p(-p)
+    shifted = logit + float(bias)
+    return 1.0 / (1.0 + np.exp(-shifted))
+
+
 def compose_soft_cascade(mi_probability: np.ndarray, stemi_given_mi_probability: np.ndarray) -> np.ndarray:
     """Compose P(MI) and P(STEMI|MI) into three mutually exclusive probabilities.
 
@@ -25,19 +37,105 @@ def compose_soft_cascade(mi_probability: np.ndarray, stemi_given_mi_probability:
     )
 
 
+def compose_calibrated_soft_cascade(
+    mi_probability: np.ndarray,
+    stemi_given_mi_probability: np.ndarray,
+    mi_logit_bias: float = 0.0,
+    stemi_logit_bias: float = 0.0,
+) -> np.ndarray:
+    """Compose a soft cascade after validation-fitted logit-bias calibration.
+
+    The two biases adjust decision calibration only; they do not change either
+    binary model's AUROC ranking.  Values must be chosen on validation data and
+    frozen before evaluating the held-out test fold.
+    """
+    p_mi = apply_binary_logit_bias(mi_probability, mi_logit_bias)
+    p_stemi = apply_binary_logit_bias(stemi_given_mi_probability, stemi_logit_bias)
+    return compose_soft_cascade(p_mi, p_stemi)
+
+
+def calibrate_soft_cascade(
+    y_true: np.ndarray,
+    mi_probability: np.ndarray,
+    stemi_given_mi_probability: np.ndarray,
+    minimum_stemi_recall: float | None = None,
+    bias_min: float = -2.0,
+    bias_max: float = 2.0,
+    bias_step: float = 0.1,
+) -> tuple[dict[str, float | bool | int | None], pd.DataFrame]:
+    """Fit two hierarchy-preserving logit biases on validation data only.
+
+    The search maximizes macro-F1, then balanced accuracy, then STEMI recall.
+    An optional STEMI-recall floor can be imposed.  This calibrates the final
+    three-class decision while preserving the probabilistic hierarchy:
+
+      P(non-MI) = 1 - P(MI)
+      P(STEMI)  = P(MI) * P(STEMI | MI)
+      P(NSTEMI) = P(MI) * (1 - P(STEMI | MI))
+    """
+    y = np.asarray(y_true, dtype=int).reshape(-1)
+    p_mi = np.asarray(mi_probability, dtype=float).reshape(-1)
+    p_stemi = np.asarray(stemi_given_mi_probability, dtype=float).reshape(-1)
+    if y.shape != p_mi.shape or y.shape != p_stemi.shape:
+        raise ValueError("y_true and cascade probabilities must have the same shape")
+    if minimum_stemi_recall is not None and not 0.0 <= float(minimum_stemi_recall) <= 1.0:
+        raise ValueError("minimum_stemi_recall must be in [0, 1]")
+    if bias_step <= 0 or bias_max < bias_min:
+        raise ValueError("invalid bias search range")
+
+    bias_values = np.arange(float(bias_min), float(bias_max) + 0.5 * float(bias_step), float(bias_step))
+    rows: list[dict[str, float | bool]] = []
+    for mi_bias in bias_values:
+        calibrated_mi = apply_binary_logit_bias(p_mi, float(mi_bias))
+        for stemi_bias in bias_values:
+            calibrated_stemi = apply_binary_logit_bias(p_stemi, float(stemi_bias))
+            probabilities = compose_soft_cascade(calibrated_mi, calibrated_stemi)
+            pred = probabilities.argmax(axis=1)
+            macro_f1 = float(f1_score(y, pred, average="macro", zero_division=0))
+            balanced = float(balanced_accuracy_score(y, pred))
+            stemi_recall = float(recall_score(y, pred, labels=[1], average=None, zero_division=0)[0])
+            rows.append(
+                {
+                    "mi_logit_bias": float(mi_bias),
+                    "stemi_logit_bias": float(stemi_bias),
+                    "macro_f1": macro_f1,
+                    "balanced_accuracy": balanced,
+                    "stemi_recall": stemi_recall,
+                    "meets_minimum_stemi_recall": minimum_stemi_recall is None
+                    or stemi_recall >= float(minimum_stemi_recall),
+                }
+            )
+
+    table = pd.DataFrame(rows)
+    feasible = table[table["meets_minimum_stemi_recall"]]
+    constraint_satisfied = not feasible.empty
+    pool = feasible if constraint_satisfied else table
+    chosen = pool.sort_values(
+        ["macro_f1", "balanced_accuracy", "stemi_recall", "mi_logit_bias", "stemi_logit_bias"],
+        ascending=[False, False, False, True, True],
+        kind="stable",
+    ).iloc[0]
+    summary: dict[str, float | bool | int | None] = {
+        "objective": "macro_f1",
+        "minimum_stemi_recall": None if minimum_stemi_recall is None else float(minimum_stemi_recall),
+        "constraint_satisfied": bool(constraint_satisfied),
+        "candidate_count": int(len(table)),
+        "mi_logit_bias": float(chosen["mi_logit_bias"]),
+        "stemi_logit_bias": float(chosen["stemi_logit_bias"]),
+        "macro_f1": float(chosen["macro_f1"]),
+        "balanced_accuracy": float(chosen["balanced_accuracy"]),
+        "stemi_recall": float(chosen["stemi_recall"]),
+    }
+    return summary, table
+
+
 def compose_hard_cascade(
     mi_probability: np.ndarray,
     stemi_given_mi_probability: np.ndarray,
     mi_threshold: float = 0.5,
     stemi_threshold: float = 0.5,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Apply a literal two-stage gate and return three-class scores and predictions.
-
-    Records below the MI threshold stop at stage 1 and become non_mi. Records
-    above it are routed to stage 2 and classified as STEMI-proxy or
-    NSTEMI-proxy. The returned score rows sum to one so existing Miclass3
-    reporting utilities can still compute AUROC/AUPRC.
-    """
+    """Apply a literal two-stage gate and return three-class scores and predictions."""
     p_mi = np.asarray(mi_probability, dtype=float).reshape(-1)
     p_stemi_mi = np.asarray(stemi_given_mi_probability, dtype=float).reshape(-1)
     if p_mi.shape != p_stemi_mi.shape:
@@ -51,8 +149,6 @@ def compose_hard_cascade(
     predictions[routed & (p_stemi_mi >= float(stemi_threshold))] = 1
     predictions[routed & (p_stemi_mi < float(stemi_threshold))] = 2
 
-    # Make argmax reproduce the literal routing decision while preserving the
-    # conditional probabilities within the selected branch.
     hard_scores = scores.copy()
     stop = ~routed
     if np.any(stop):

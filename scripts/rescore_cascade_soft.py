@@ -62,20 +62,37 @@ def score_mode(
     )
 
 
+def recall_mode_name(recall_floor: float) -> str:
+    return f"moderate_{int(round(recall_floor * 100)):02d}"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Re-score an existing cascade run into three validation-safe operating points "
-            "without retraining: default, balanced, and high-sensitivity."
+            "Re-score an existing cascade run into validation-safe operating points "
+            "without retraining: default, macro-F1 optimized, moderate-sensitivity, "
+            "and high-sensitivity."
         )
     )
     parser.add_argument("--source-dir", default="artifacts/cascade_v3")
     parser.add_argument("--out-dir", default="artifacts/cascade_v3_operating_points")
+    parser.add_argument(
+        "--moderate-recalls",
+        type=float,
+        nargs="*",
+        default=[0.65, 0.70],
+        help="Validation STEMI-recall floors for intermediate operating points (default: 0.65 0.70).",
+    )
     parser.add_argument("--high-sensitivity-recall", type=float, default=0.75)
     parser.add_argument("--bias-min", type=float, default=-2.0)
     parser.add_argument("--bias-max", type=float, default=2.0)
     parser.add_argument("--bias-step", type=float, default=0.1)
     args = parser.parse_args()
+
+    recall_floors = [float(value) for value in args.moderate_recalls]
+    for value in [*recall_floors, float(args.high_sensitivity_recall)]:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("all STEMI recall floors must be in [0, 1]")
 
     source = ROOT / args.source_dir
     out = ROOT / args.out_dir
@@ -83,9 +100,9 @@ def main() -> None:
 
     val = load_details(source / "val_cascade_details.csv")
 
-    # Balanced: validation-only search with no STEMI-recall floor. The existing
-    # calibration routine maximizes macro-F1, then balanced accuracy, then
-    # STEMI recall. This is the general-purpose operating point.
+    # General-purpose point: validation-only search with no STEMI-recall floor.
+    # The calibration routine maximizes macro-F1, then balanced accuracy, then
+    # STEMI recall.
     balanced_summary, balanced_candidates = fit_operating_point(
         val,
         minimum_stemi_recall=None,
@@ -95,9 +112,45 @@ def main() -> None:
     )
     balanced_candidates.to_csv(out / "val_balanced_calibration_candidates.csv", index=False)
 
-    # High sensitivity: same validation-only search, but require a STEMI recall
-    # floor. This is intentionally a separate operating point rather than the
-    # primary general-purpose classifier.
+    operating_points: dict[str, dict[str, object]] = {
+        "default": {
+            "description": "Uncalibrated probabilistic hierarchy; no fitted bias.",
+            "mi_logit_bias": 0.0,
+            "stemi_logit_bias": 0.0,
+            "stemi_recall_floor": None,
+            "validation_selection": None,
+        },
+        "balanced": {
+            "description": "Validation-selected point maximizing macro-F1, then balanced accuracy, with no recall floor.",
+            "mi_logit_bias": float(balanced_summary["mi_logit_bias"]),
+            "stemi_logit_bias": float(balanced_summary["stemi_logit_bias"]),
+            "stemi_recall_floor": None,
+            "validation_selection": balanced_summary,
+        },
+    }
+
+    # Intermediate sensitivity points. These make the sensitivity/precision
+    # trade-off explicit instead of jumping directly from unconstrained to 75%.
+    for recall_floor in recall_floors:
+        mode = recall_mode_name(recall_floor)
+        summary, candidates = fit_operating_point(
+            val,
+            minimum_stemi_recall=recall_floor,
+            bias_min=args.bias_min,
+            bias_max=args.bias_max,
+            bias_step=args.bias_step,
+        )
+        candidates.to_csv(out / f"val_{mode}_calibration_candidates.csv", index=False)
+        operating_points[mode] = {
+            "description": (
+                f"Validation-selected point maximizing macro-F1 subject to STEMI recall >= {recall_floor:.0%}."
+            ),
+            "mi_logit_bias": float(summary["mi_logit_bias"]),
+            "stemi_logit_bias": float(summary["stemi_logit_bias"]),
+            "stemi_recall_floor": recall_floor,
+            "validation_selection": summary,
+        }
+
     high_summary, high_candidates = fit_operating_point(
         val,
         minimum_stemi_recall=args.high_sensitivity_recall,
@@ -106,32 +159,19 @@ def main() -> None:
         bias_step=args.bias_step,
     )
     high_candidates.to_csv(out / "val_high_sensitivity_calibration_candidates.csv", index=False)
-
-    operating_points = {
-        "default": {
-            "description": "Uncalibrated probabilistic hierarchy; no fitted bias.",
-            "mi_logit_bias": 0.0,
-            "stemi_logit_bias": 0.0,
-            "validation_selection": None,
-        },
-        "balanced": {
-            "description": "Validation-selected general-purpose point maximizing macro-F1, then balanced accuracy.",
-            "mi_logit_bias": float(balanced_summary["mi_logit_bias"]),
-            "stemi_logit_bias": float(balanced_summary["stemi_logit_bias"]),
-            "validation_selection": balanced_summary,
-        },
-        "high_sensitivity": {
-            "description": (
-                "Validation-selected point maximizing macro-F1 subject to the configured STEMI-recall floor."
-            ),
-            "mi_logit_bias": float(high_summary["mi_logit_bias"]),
-            "stemi_logit_bias": float(high_summary["stemi_logit_bias"]),
-            "validation_selection": high_summary,
-        },
+    operating_points["high_sensitivity"] = {
+        "description": (
+            "Validation-selected point maximizing macro-F1 subject to the configured high-sensitivity STEMI-recall floor."
+        ),
+        "mi_logit_bias": float(high_summary["mi_logit_bias"]),
+        "stemi_logit_bias": float(high_summary["stemi_logit_bias"]),
+        "stemi_recall_floor": float(args.high_sensitivity_recall),
+        "validation_selection": high_summary,
     }
 
     results: dict[str, object] = {
         "source_dir": str(args.source_dir),
+        "moderate_recall_floors": recall_floors,
         "high_sensitivity_recall_floor": float(args.high_sensitivity_recall),
         "operating_points": operating_points,
         "splits": {},
@@ -175,6 +215,7 @@ def main() -> None:
                 {
                     "split": split,
                     "mode": mode,
+                    "stemi_recall_floor": spec.get("stemi_recall_floor"),
                     "accuracy": metrics.get("accuracy"),
                     "macro_f1": metrics.get("macro_f1"),
                     "balanced_accuracy": metrics.get("balanced_accuracy"),
@@ -192,8 +233,11 @@ def main() -> None:
     comparison.to_csv(out / "operating_point_comparison.csv", index=False)
     (out / "operating_point_metrics.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
 
-    test_results = results.get("splits", {}).get("test", {})
-    print(json.dumps({"test": test_results, "operating_points": operating_points}, indent=2))
+    # Print only the held-out test comparison in a compact form for quick use.
+    test_table = comparison[comparison["split"] == "test"].copy()
+    print(test_table.to_string(index=False))
+    print("\nValidation-selected operating points:")
+    print(json.dumps(operating_points, indent=2))
 
 
 if __name__ == "__main__":

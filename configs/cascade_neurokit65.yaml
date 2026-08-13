@@ -1,0 +1,62 @@
+seed: 42
+
+data:
+  source: ptb-xl-1.0.3
+  data_dir: data/ptbxl
+  stage1_waveform_normalization: per_lead_zscore
+  stage2_waveform_normalization: lead_centered_global_scale
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+
+architecture:
+  stage1:
+    width: 64
+    block_dropout: 0.10
+  stage2:
+    width: 64
+    block_dropout: 0.15
+    fusion_dropout: 0.35
+
+training:
+  batch_size: 32
+  epochs: 40
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  patience: 8
+  num_workers: 0
+  grad_clip_norm: 1.0
+
+  stage1_class_weight_power: 0.5
+  stage2_class_weight_power: 0.8
+
+  stage1_learning_rate: 0.0003
+  stage2_learning_rate: 0.00015
+  stage1_weight_decay: 0.0001
+  stage2_weight_decay: 0.0003
+
+  feature_transform:
+    clip: 6.0
+    add_missing_indicators: true
+
+cascade:
+  stage1_name: mi_vs_non_mi
+  stage1_minimum_recall: 0.90
+
+  stage2_name: stemi_vs_nstemi
+  stage2_model: morphology_fusion
+  stage2_feature_profile: lead_aware
+  stage2_minimum_recall: null
+  transfer_stage1_encoder: true
+
+  routing_mode: validation_calibrated_soft_hierarchy
+  final_soft_calibration:
+    # Moderate-sensitivity operating point: select calibration on validation
+    # fold 9 subject to STEMI-proxy recall >= 65%. Test fold 10 stays untouched.
+    minimum_stemi_recall: 0.65
+    bias_min: -2.0
+    bias_max: 2.0
+    bias_step: 0.1
+
+output:
+  out_dir: artifacts/cascade_v3_neurokit65

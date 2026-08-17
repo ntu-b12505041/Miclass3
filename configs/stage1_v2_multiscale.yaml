@@ -1,0 +1,49 @@
+seed: 42
+
+data:
+  source: ptb-xl-1.0.3
+  data_dir: data/ptbxl
+  waveform_normalization: per_lead_zscore
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+
+architecture:
+  width: 64
+  # The model first downsamples 500 Hz -> 125 Hz; these kernels therefore
+  # span about 88 ms, 200 ms and 392 ms without the cost of 45/95/195 taps.
+  kernels: [11, 25, 49]
+  bottleneck: 32
+  block_dropout: 0.10
+  head_dropout: 0.20
+
+training:
+  batch_size: 32
+  epochs: 50
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  patience: 10
+  num_workers: 0
+  grad_clip_norm: 1.0
+
+  # Primary MI-vs-non-MI loss remains the routing objective.
+  primary_class_weight_power: 0.5
+
+  # Auxiliary three-class supervision makes the shared representation retain
+  # NSTEMI-proxy evidence instead of learning only obvious STEMI morphology.
+  auxiliary_weight: 0.35
+  auxiliary_class_weight_power: 0.5
+  nstemi_aux_weight: 1.75
+
+selection:
+  # Every epoch selects its validation-only MI threshold by the weakest of:
+  # non-MI retention, STEMI->MI routing, NSTEMI->MI routing. Checkpoints use
+  # the same worst-route metric instead of aggregate AUPRC.
+  objective: maximin_route_recall
+  target_worst_route_recall: 0.85
+  stretch_non_mi_recall: 0.88
+  stretch_stemi_route_recall: 0.92
+  stretch_nstemi_route_recall: 0.95
+
+output:
+  out_dir: artifacts/stage1_v2_multiscale

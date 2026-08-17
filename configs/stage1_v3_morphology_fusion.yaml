@@ -1,0 +1,48 @@
+seed: 42
+
+data:
+  source: ptb-xl-1.0.3
+  data_dir: data/ptbxl
+  waveform_normalization: per_lead_zscore
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+
+architecture:
+  width: 64
+  block_dropout: 0.15
+  fusion_dropout: 0.35
+
+features:
+  profile: lead_aware
+  clip: 6.0
+  add_missing_indicators: true
+
+training:
+  batch_size: 32
+  epochs: 40
+  learning_rate: 0.0002
+  weight_decay: 0.0005
+  patience: 8
+  num_workers: 0
+  grad_clip_norm: 1.0
+
+  primary_class_weight_power: 0.5
+  primary_label_smoothing: 0.02
+
+  # v2 fit NSTEMI-proxy well on train but did not generalize. Reduce the
+  # auxiliary pressure instead of increasing it further.
+  auxiliary_weight: 0.20
+  auxiliary_class_weight_power: 0.5
+  nstemi_aux_weight: 1.25
+  auxiliary_label_smoothing: 0.05
+
+selection:
+  objective: maximin_route_recall
+  target_worst_route_recall: 0.85
+  stretch_non_mi_recall: 0.88
+  stretch_stemi_route_recall: 0.92
+  stretch_nstemi_route_recall: 0.90
+
+output:
+  out_dir: artifacts/stage1_v3_morphology_fusion

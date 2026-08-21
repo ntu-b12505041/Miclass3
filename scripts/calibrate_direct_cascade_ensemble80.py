@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from miclass3.direct_cascade_ensemble import (
+    apply_class_biases,
+    blend_probabilities,
     cascade_soft_probabilities,
     search_direct_cascade_ensemble,
 )
@@ -85,14 +87,37 @@ def print_summary(title: str, summary: dict[str, object], cm: np.ndarray) -> Non
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Validation-only Direct + Stage1-v3 Cascade ensemble calibration."
+def probability_inputs(joined: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    direct_prob = joined[["prob_non_mi", "prob_stemi_proxy", "prob_nstemi_proxy"]].to_numpy(float)
+    cascade_prob = cascade_soft_probabilities(
+        joined["p_mi"].to_numpy(float),
+        joined["p_stemi_given_mi"].to_numpy(float),
     )
-    parser.add_argument("--config", default="configs/direct_cascade_ensemble80.yaml")
-    args = parser.parse_args()
+    return direct_prob, cascade_prob
 
-    cfg = yaml.safe_load((ROOT / args.config).read_text(encoding="utf-8"))
+
+def save_ensemble_predictions(
+    joined: pd.DataFrame,
+    cascade_prob: np.ndarray,
+    ensemble_prob: np.ndarray,
+    predictions: np.ndarray,
+    path: Path,
+) -> None:
+    table = joined[
+        ["ecg_id", "actual_id", "prob_non_mi", "prob_stemi_proxy", "prob_nstemi_proxy", "p_mi", "p_stemi_given_mi"]
+    ].copy()
+    table["cascade_prob_non_mi"] = cascade_prob[:, 0]
+    table["cascade_prob_stemi_proxy"] = cascade_prob[:, 1]
+    table["cascade_prob_nstemi_proxy"] = cascade_prob[:, 2]
+    table["ensemble_prob_non_mi"] = ensemble_prob[:, 0]
+    table["ensemble_prob_stemi_proxy"] = ensemble_prob[:, 1]
+    table["ensemble_prob_nstemi_proxy"] = ensemble_prob[:, 2]
+    table["predicted_id"] = predictions.astype(int)
+    table["predicted_label"] = [CLASS_NAMES[int(x)] for x in predictions]
+    table.to_csv(path, index=False)
+
+
+def run_validation(cfg: dict) -> None:
     inputs = cfg["inputs"]
     target = float(cfg.get("target", 0.80))
     promotion = float(cfg.get("promotion_minimum_of_six", target))
@@ -106,19 +131,16 @@ def main() -> None:
 
     joined = load_joined(direct_path, stage1_path, stage2_path)
     y = joined["actual_id"].to_numpy(dtype=int)
-    direct_prob = joined[["prob_non_mi", "prob_stemi_proxy", "prob_nstemi_proxy"]].to_numpy(float)
-    p_mi = joined["p_mi"].to_numpy(float)
-    p_stemi = joined["p_stemi_given_mi"].to_numpy(float)
+    direct_prob, cascade_prob = probability_inputs(joined)
 
     direct_summary, direct_cm = six_metric_summary(y, direct_prob.argmax(axis=1), target=target)
-    cascade_prob = cascade_soft_probabilities(p_mi, p_stemi)
     cascade_summary, cascade_cm = six_metric_summary(y, cascade_prob.argmax(axis=1), target=target)
 
     best, rows = search_direct_cascade_ensemble(
         y,
         direct_prob,
-        p_mi,
-        p_stemi,
+        joined["p_mi"].to_numpy(float),
+        joined["p_stemi_given_mi"].to_numpy(float),
         target=target,
         **(cfg.get("search", {}) or {}),
     )
@@ -129,18 +151,13 @@ def main() -> None:
     pd.DataFrame(best.confusion_matrix, index=CLASS_NAMES, columns=CLASS_NAMES).to_csv(
         out_dir / "validation_confusion_matrix.csv"
     )
-
-    prediction_table = joined[
-        ["ecg_id", "actual_id", "prob_non_mi", "prob_stemi_proxy", "prob_nstemi_proxy", "p_mi", "p_stemi_given_mi"]
-    ].copy()
-    prediction_table["cascade_prob_non_mi"] = cascade_prob[:, 0]
-    prediction_table["cascade_prob_stemi_proxy"] = cascade_prob[:, 1]
-    prediction_table["cascade_prob_nstemi_proxy"] = cascade_prob[:, 2]
-    prediction_table["ensemble_prob_non_mi"] = best.probabilities[:, 0]
-    prediction_table["ensemble_prob_stemi_proxy"] = best.probabilities[:, 1]
-    prediction_table["ensemble_prob_nstemi_proxy"] = best.probabilities[:, 2]
-    prediction_table["predicted_id"] = best.predictions
-    prediction_table.to_csv(out_dir / "validation_predictions.csv", index=False)
+    save_ensemble_predictions(
+        joined,
+        cascade_prob,
+        best.probabilities,
+        best.predictions,
+        out_dir / "validation_predictions.csv",
+    )
 
     validation = {
         "alpha_direct": best.alpha_direct,
@@ -190,6 +207,94 @@ def main() -> None:
     print(f"Promotion minimum required = {promotion:.4f}")
     print(f"Promotion passed: {validation['promotion_passed']}")
     print(f"Saved: {out_dir / 'metrics.json'}")
+
+
+def run_finalize(cfg: dict) -> None:
+    inputs = cfg["inputs"]
+    target = float(cfg.get("target", 0.80))
+    out_dir = ROOT / cfg["output"]["out_dir"]
+    metrics_path = out_dir / "metrics.json"
+    if not metrics_path.is_file():
+        raise FileNotFoundError("Run Fold-9 ensemble selection first")
+
+    summary = json.loads(metrics_path.read_text(encoding="utf-8"))
+    validation = summary["validation"]
+    if not bool(validation["all_six_strictly_above_target"]):
+        raise RuntimeError(
+            "Fold-9 ensemble did not meet the user's strict >0.80 target for all six metrics; refusing finalize"
+        )
+
+    direct_path = ROOT / inputs["direct_test_predictions"]
+    stage1_path = ROOT / inputs["stage1_test_predictions"]
+    stage2_path = ROOT / inputs["stage2_test_details"]
+    for path in (direct_path, stage1_path, stage2_path):
+        if not path.is_file():
+            raise FileNotFoundError(path)
+
+    joined = load_joined(direct_path, stage1_path, stage2_path)
+    y = joined["actual_id"].to_numpy(dtype=int)
+    direct_prob, cascade_prob = probability_inputs(joined)
+
+    alpha_direct = float(validation["alpha_direct"])
+    stemi_bias = float(validation["stemi_bias"])
+    nstemi_bias = float(validation["nstemi_bias"])
+    mixed = blend_probabilities(direct_prob, cascade_prob, alpha_direct)
+    ensemble_prob = apply_class_biases(mixed, stemi_bias, nstemi_bias)
+    predictions = ensemble_prob.argmax(axis=1)
+    test_summary, cm = six_metric_summary(y, predictions, target=target)
+
+    save_ensemble_predictions(
+        joined,
+        cascade_prob,
+        ensemble_prob,
+        predictions,
+        out_dir / "test_predictions.csv",
+    )
+    pd.DataFrame(cm, index=CLASS_NAMES, columns=CLASS_NAMES).to_csv(
+        out_dir / "test_confusion_matrix.csv"
+    )
+
+    summary["test"] = {
+        "alpha_direct": alpha_direct,
+        "alpha_cascade": 1.0 - alpha_direct,
+        "stemi_bias": stemi_bias,
+        "nstemi_bias": nstemi_bias,
+        "minimum_of_six": test_summary["minimum_of_six"],
+        "mean_of_six": test_summary["mean_of_six"],
+        "accuracy": test_summary["accuracy"],
+        "all_six_strictly_above_target": test_summary["all_six_strictly_above_target"],
+        "n_records": int(len(joined)),
+    }
+    summary["test_per_class"] = test_summary["per_class"]
+    summary["test_confusion_matrix"] = cm.tolist()
+    summary["test_evaluated"] = True
+    summary["note"] = (
+        "Fold-10 ensemble uses alpha and class biases frozen from Fold 9. "
+        "No Fold-10 search, calibration, threshold tuning, or retraining is performed."
+    )
+    metrics_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    print(f"Frozen Direct weight alpha: {alpha_direct:.3f}")
+    print(f"Frozen Cascade weight: {1.0 - alpha_direct:.3f}")
+    print(f"Frozen STEMI logit bias: {stemi_bias:.3f}")
+    print(f"Frozen NSTEMI logit bias: {nstemi_bias:.3f}")
+    print_summary("FROZEN DIRECT + CASCADE ENSEMBLE -> FOLD 10", test_summary, cm)
+    print(f"Updated: {metrics_path}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Direct + Stage1-v3 Cascade ensemble validation calibration and frozen Fold-10 evaluation."
+    )
+    parser.add_argument("--config", default="configs/direct_cascade_ensemble80.yaml")
+    parser.add_argument("--finalize-only", action="store_true")
+    args = parser.parse_args()
+
+    cfg = yaml.safe_load((ROOT / args.config).read_text(encoding="utf-8"))
+    if args.finalize_only:
+        run_finalize(cfg)
+    else:
+        run_validation(cfg)
 
 
 if __name__ == "__main__":

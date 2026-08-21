@@ -1,0 +1,15 @@
+target: 0.80
+
+inputs:
+  stage1_validation_predictions: artifacts/stage1_v3_morphology_fusion/val_predictions.csv
+  stage2_validation_details: artifacts/cascade_v3_custom65_common/val_cascade_details.csv
+  stage1_test_predictions: artifacts/stage1_v3_morphology_fusion/test_predictions.csv
+  stage2_test_details: artifacts/cascade_v3_custom65_common/test_cascade_details.csv
+
+search:
+  coarse_step: 0.01
+  fine_radius: 0.03
+  fine_step: 0.001
+
+output:
+  out_dir: artifacts/stage1_v3_stage2_strict80

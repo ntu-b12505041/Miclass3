@@ -1,0 +1,26 @@
+target: 0.80
+# Require validation margin before another Fold-10 benchmark check.
+promotion_minimum_of_six: 0.82
+
+inputs:
+  stage1_train_predictions: artifacts/stage1_v3_morphology_fusion/train_predictions.csv
+  stage2_train_details: artifacts/cascade_v3_custom65_common/train_cascade_details.csv
+  stage1_validation_predictions: artifacts/stage1_v3_morphology_fusion/val_predictions.csv
+  stage2_validation_details: artifacts/cascade_v3_custom65_common/val_cascade_details.csv
+  stage1_test_predictions: artifacts/stage1_v3_morphology_fusion/test_predictions.csv
+  stage2_test_details: artifacts/cascade_v3_custom65_common/test_cascade_details.csv
+
+search:
+  # Tiny regularized multinomial head only; ECG backbones stay frozen.
+  c_values: [0.03, 0.1, 0.3, 1.0, 3.0]
+  class_weight_powers: [0.0, 0.25, 0.5, 0.75]
+
+  # Small validation-only class-bias calibration after the stacker.
+  bias_min: -0.8
+  bias_max: 0.8
+  bias_coarse_step: 0.1
+  bias_fine_radius: 0.15
+  bias_fine_step: 0.02
+
+output:
+  out_dir: artifacts/stage1_v3_stage2_logistic_stacker80

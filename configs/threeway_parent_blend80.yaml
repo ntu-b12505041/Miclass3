@@ -7,6 +7,13 @@ inputs:
   direct_aux_validation_predictions: artifacts/direct_common65_matched/val_aux_predictions.csv
   stage2_validation_details: artifacts/cascade_v3_custom65_common/val_cascade_details.csv
 
+  # Fold10 paths are used only by the frozen finalize script. No search or
+  # threshold selection is permitted on these files.
+  stage1_test_predictions: artifacts/stage1_v3_morphology_fusion/test_predictions.csv
+  direct_test_predictions: artifacts/direct_common65_matched/test_predictions.csv
+  direct_aux_test_predictions: artifacts/direct_common65_matched/test_aux_predictions.csv
+  stage2_test_details: artifacts/cascade_v3_custom65_common/test_cascade_details.csv
+
 search:
   weight_coarse_step: 0.10
   weight_fine_radius: 0.10

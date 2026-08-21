@@ -1,0 +1,20 @@
+target: 0.80
+promotion_minimum_of_six: 0.82
+
+inputs:
+  stage1_validation_predictions: artifacts/stage1_v3_morphology_fusion/val_predictions.csv
+  direct_aux_validation_predictions: artifacts/direct_common65_matched/val_aux_predictions.csv
+  stage2_validation_details: artifacts/cascade_v3_custom65_common/val_cascade_details.csv
+
+search:
+  alpha_min: 0.0
+  alpha_max: 1.0
+  alpha_coarse_step: 0.05
+  alpha_fine_radius: 0.05
+  alpha_fine_step: 0.01
+  threshold_coarse_step: 0.01
+  threshold_fine_radius: 0.03
+  threshold_fine_step: 0.001
+
+output:
+  out_dir: artifacts/direct_mi_parent_blend80

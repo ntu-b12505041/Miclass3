@@ -1,11 +1,15 @@
 target: 0.80
-# Require validation margin before another Fold-10 benchmark check.
+# Historical conservative promotion margin. The user's actual acceptance target
+# is all six class-wise sensitivity/specificity metrics strictly above 0.80.
 promotion_minimum_of_six: 0.82
 
 inputs:
   direct_validation_predictions: artifacts/direct_common65_matched/val_predictions.csv
   stage1_validation_predictions: artifacts/stage1_v3_morphology_fusion/val_predictions.csv
   stage2_validation_details: artifacts/cascade_v3_custom65_common/val_cascade_details.csv
+  direct_test_predictions: artifacts/direct_common65_matched/test_predictions.csv
+  stage1_test_predictions: artifacts/stage1_v3_morphology_fusion/test_predictions.csv
+  stage2_test_details: artifacts/cascade_v3_custom65_common/test_cascade_details.csv
 
 search:
   alpha_min: 0.0

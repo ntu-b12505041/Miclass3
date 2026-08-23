@@ -1,0 +1,15 @@
+target: 0.80
+# This is only a promotion margin. The real acceptance target remains all six > 0.80.
+promotion_minimum_of_six: 0.82
+
+inputs:
+  validation_aux_predictions: artifacts/direct_common65_matched/val_aux_predictions.csv
+  test_aux_predictions: artifacts/direct_common65_matched/test_aux_predictions.csv
+
+search:
+  coarse_step: 0.01
+  fine_radius: 0.03
+  fine_step: 0.001
+
+output:
+  out_dir: artifacts/direct_aux_hierarchy80

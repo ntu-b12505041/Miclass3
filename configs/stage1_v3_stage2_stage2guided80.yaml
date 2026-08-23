@@ -1,0 +1,29 @@
+target: 0.80
+# Require validation margin before another Fold-10 benchmark check.
+promotion_minimum_of_six: 0.82
+
+inputs:
+  stage1_validation_predictions: artifacts/stage1_v3_morphology_fusion/val_predictions.csv
+  stage2_validation_details: artifacts/cascade_v3_custom65_common/val_cascade_details.csv
+  stage1_test_predictions: artifacts/stage1_v3_morphology_fusion/test_predictions.csv
+  stage2_test_details: artifacts/cascade_v3_custom65_common/test_cascade_details.csv
+
+search:
+  # Local search around the previously accepted Fold-9 operating point.
+  mi_center: 0.324
+  stemi_center: 0.276
+  mi_radius: 0.05
+  stemi_radius: 0.04
+  threshold_step: 0.004
+
+  # Only lower the parent gate for samples that Stage2 itself scores as
+  # strongly NSTEMI-like. This is a narrow counterfactual rescue path.
+  rescue_band_min: 0.02
+  rescue_band_max: 0.18
+  rescue_band_step: 0.02
+  rescue_stemi_max_min: 0.04
+  rescue_stemi_max_max: 0.28
+  rescue_stemi_max_step: 0.02
+
+output:
+  out_dir: artifacts/stage1_v3_stage2_stage2guided80

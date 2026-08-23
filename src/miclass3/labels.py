@@ -33,7 +33,14 @@ def mi_scp_codes(scp: pd.DataFrame) -> set[str]:
 
 
 def _is_old_stage(value: object) -> bool:
-    return "old" in str(value).lower()
+    """Primary old-MI exclusion: PTB-XL infarction Stadium III only.
+
+    Stadium II-III is intentionally retained for the main experiment and can
+    be evaluated later as a sensitivity analysis. This replaces the previous
+    generic substring check for the word `old`.
+    """
+    stage = " ".join(str(value).strip().lower().split())
+    return stage == "stadium iii"
 
 
 def _truthy(row: Mapping[str, object], name: str) -> bool:
@@ -49,8 +56,8 @@ def label_record(
     """Create the agreed ECG-only proxy label.
 
     STEMI proxy requires either standard contiguous-lead J-point elevation or a
-    positive modified-Sgarbossa assessment for LBBB.  Every other non-old MI
-    SCP statement is NSTEMI-proxy by definition; it is not a clinical NSTEMI.
+    positive modified-Sgarbossa assessment for LBBB.  Every other non-excluded
+    MI SCP statement is NSTEMI-proxy by definition; it is not a clinical NSTEMI.
     """
     codes = parse_scp_codes(row.get("scp_codes", {}))
     has_mi = any(code in mi_codes and score > 0 for code, score in codes.items())

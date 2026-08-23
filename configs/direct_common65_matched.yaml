@@ -1,0 +1,67 @@
+seed: 42
+
+data:
+  source: ptb-xl-1.0.3
+  data_dir: data/ptbxl
+  sampling_rate: 500
+  lead_mode: all12
+  waveform_normalization: lead_centered_global_scale
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+
+labels:
+  old_mi_policy: exclude
+  require_morphology_for_stemi: true
+
+models:
+  primary: morphology_fusion
+  candidates: [morphology_fusion]
+  architecture:
+    width: 64
+    block_dropout: 0.15
+    fusion_dropout: 0.35
+
+training:
+  batch_size: 32
+  epochs: 40
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  patience: 8
+  num_workers: 0
+
+  feature_profile: extended
+  classification_loss: cross_entropy
+  label_smoothing: 0.0
+
+  auxiliary_weight: 0.35
+  mi_auxiliary_weight: 0.25
+  lbbb_auxiliary_weight: 0.05
+
+  majority_subsample:
+    enabled: true
+    majority_label: 0
+    reference_label: 2
+    max_ratio: 2.0
+
+  sampling_strategy: sqrt
+  sampling_power: 0.5
+  class_weight_power: 0.8
+  auxiliary_pos_weight_power: 0.8
+
+  feature_transform:
+    clip: 6.0
+    add_missing_indicators: true
+
+  lr_scheduler:
+    enabled: true
+    factor: 0.5
+    patience: 3
+    min_lr: 0.00001
+
+metrics:
+  selection_metric: val_macro_auprc
+  calibrate_stemi_threshold: true
+  stemi_threshold:
+    minimum_stemi_recall: 0.65
+  report: [macro_auroc, macro_auprc, macro_f1, balanced_accuracy, stemi_recall]

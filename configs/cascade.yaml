@@ -1,0 +1,77 @@
+seed: 42
+
+data:
+  source: ptb-xl-1.0.3
+  data_dir: data/ptbxl
+  # Stage 1 keeps the stable historical normalization used for MI detection.
+  stage1_waveform_normalization: per_lead_zscore
+  # Stage 2 preserves inter-lead amplitude relationships, which matter for ST
+  # morphology and contiguous-lead STEMI patterns.
+  stage2_waveform_normalization: lead_centered_global_scale
+  train_folds: [1, 2, 3, 4, 5, 6, 7, 8]
+  val_folds: [9]
+  test_folds: [10]
+
+architecture:
+  stage1:
+    width: 64
+    block_dropout: 0.10
+  stage2:
+    width: 64
+    # Slightly stronger regularization for the much smaller conditional task.
+    block_dropout: 0.15
+    fusion_dropout: 0.35
+
+training:
+  batch_size: 32
+  epochs: 40
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  patience: 8
+  num_workers: 0
+  grad_clip_norm: 1.0
+
+  stage1_class_weight_power: 0.5
+  stage2_class_weight_power: 0.8
+
+  # Fine-tuning a transferred encoder should move more conservatively than
+  # training stage 1 from scratch.
+  stage1_learning_rate: 0.0003
+  stage2_learning_rate: 0.00015
+  stage1_weight_decay: 0.0001
+  stage2_weight_decay: 0.0003
+
+  # Fit morphology scaling only on folds 1-8 MI records used by stage 2.
+  feature_transform:
+    clip: 6.0
+    add_missing_indicators: true
+
+cascade:
+  stage1_name: mi_vs_non_mi
+  stage1_minimum_recall: 0.90
+
+  stage2_name: stemi_vs_nstemi
+  stage2_model: morphology_fusion
+
+  # `lead_aware` keeps the global morphology summary and adds per-lead J-point,
+  # J+60, S-depth and QRS-polarity features when they exist. Direct target-rule
+  # fields such as standard_stemi and modified_sgarbossa_positive stay excluded.
+  stage2_feature_profile: lead_aware
+  stage2_minimum_recall: null
+
+  # Reuse the stage-1 SE-ResNet representation as the initialization for the
+  # stage-2 waveform encoder, then fine-tune jointly with morphology features.
+  transfer_stage1_encoder: true
+
+  # Primary decision rule: retain the probabilistic hierarchy and fit only two
+  # logit biases on validation fold 9. Fold 10 is never used for calibration.
+  routing_mode: validation_calibrated_soft_hierarchy
+  final_soft_calibration:
+    minimum_stemi_recall: 0.75
+    bias_min: -2.0
+    bias_max: 2.0
+    bias_step: 0.1
+
+output:
+  # Keep v1/v2 outputs intact for ablation comparison.
+  out_dir: artifacts/cascade_v3
